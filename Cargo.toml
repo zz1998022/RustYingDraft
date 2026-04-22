@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/jy_schema",
+    "crates/jy_media",
+    "crates/jy_timeline",
+    "crates/jy_draft",
+    "crates/jy_template",
+    "crates/jy_cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["YingDraft Contributors"]
+readme = "README.md"
+keywords = ["jianying", "video", "draft", "timeline", "rust"]
+categories = ["multimedia", "multimedia::video", "command-line-utilities"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+camino = { version = "1", features = ["serde1"] }
+
+[workspace.metadata.yingdraft]
+display-name = "YingDraft"
+tagline = "Rust toolkit for generating and editing JianYing drafts"
+primary-binary = "jy_cli"
