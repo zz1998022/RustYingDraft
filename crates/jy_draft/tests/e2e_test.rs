@@ -213,17 +213,75 @@ fn test_write_draft_to_directory() {
 
     // Verify files exist
     assert!(std::fs::metadata(output.join("draft_content.json")).is_ok());
+    assert!(std::fs::metadata(output.join("draft_info.json")).is_ok());
     assert!(std::fs::metadata(output.join("draft_meta_info.json")).is_ok());
 
     // Verify draft_content.json is valid JSON
     let content = std::fs::read_to_string(output.join("draft_content.json")).unwrap();
     let json: Value = serde_json::from_str(&content).unwrap();
     assert_eq!(json["duration"], 3_000_000);
+    assert_eq!(
+        content,
+        std::fs::read_to_string(output.join("draft_info.json")).unwrap()
+    );
 
     // Verify draft_meta_info.json
     let meta = std::fs::read_to_string(output.join("draft_meta_info.json")).unwrap();
     let meta_json: Value = serde_json::from_str(&meta).unwrap();
     assert_eq!(meta_json["draft_name"], "test_output");
+    assert_eq!(meta_json["draft_root_path"], output.as_str());
+    assert_eq!(meta_json["draft_fold_path"], output.as_str());
+}
+
+#[test]
+fn test_write_draft_localizes_assets_into_output_directory() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let temp_root = camino::Utf8Path::from_path(dir.path()).unwrap();
+    let output = temp_root.join("localized_draft");
+    let source_asset = temp_root.join("source_clip.mp4");
+    std::fs::write(&source_asset, b"fake-video").unwrap();
+
+    let video_mat = VideoMaterialRef {
+        id: new_id(),
+        path: source_asset.clone(),
+        duration: 3_000_000,
+        width: 1920,
+        height: 1080,
+        kind: MaterialKind::Video,
+        crop: CropSettings::default(),
+        name: "source_clip.mp4".into(),
+    };
+
+    let project = Project {
+        id: new_id(),
+        name: "localized_output".into(),
+        canvas: Canvas::default(),
+        maintrack_adsorb: true,
+        tracks: vec![Track {
+            id: new_id(),
+            kind: TrackKind::Video,
+            name: "v1".into(),
+            render_index: 0,
+            mute: false,
+            clips: vec![make_video_clip(&video_mat, 0, 3_000_000)],
+        }],
+        video_materials: vec![video_mat],
+        audio_materials: vec![],
+        duration: 3_000_000,
+    };
+
+    jy_draft::writer::write_draft(&project, &output).expect("write should succeed");
+
+    let localized_path = output.join("_assets/video/video_0000_source_clip.mp4");
+    assert!(localized_path.exists());
+    assert_eq!(std::fs::read(&localized_path).unwrap(), b"fake-video");
+
+    let content = std::fs::read_to_string(output.join("draft_content.json")).unwrap();
+    let json: Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        json["materials"]["videos"][0]["path"],
+        localized_path.as_str()
+    );
 }
 
 #[test]
