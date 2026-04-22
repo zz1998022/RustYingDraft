@@ -1,6 +1,8 @@
 mod commands;
+mod output;
 
-use clap::{Parser, ValueEnum};
+use clap::{error::ErrorKind, Parser, Subcommand, ValueEnum};
+use serde_json::json;
 
 /// 素材类型参数。
 ///
@@ -23,7 +25,34 @@ enum EditableTrackKindArg {
 
 #[derive(Parser)]
 #[command(name = "jy", about = "剪映草稿生成与模板处理 CLI")]
-enum Cli {
+struct Cli {
+    /// 控制 CLI 的输出格式。
+    ///
+    /// `text` 适合人手工执行；`json` 适合后端稳定解析。
+    #[arg(long, value_enum, global = true, default_value_t = OutputFormatArg::Text)]
+    output_format: OutputFormatArg,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputFormatArg {
+    Text,
+    Json,
+}
+
+impl From<OutputFormatArg> for output::OutputFormat {
+    fn from(value: OutputFormatArg) -> Self {
+        match value {
+            OutputFormatArg::Text => output::OutputFormat::Text,
+            OutputFormatArg::Json => output::OutputFormat::Json,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum Command {
     /// 初始化一个空的 project manifest。
     Init {
         #[arg(short, long)]
@@ -147,19 +176,58 @@ enum Cli {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
+    let args = std::env::args().collect::<Vec<_>>();
+    let wants_json = args.windows(2).any(|pair| {
+        pair[0] == "--output-format" && pair[1].eq_ignore_ascii_case("json")
+    }) || args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("--output-format=json"));
+
+    output::init(if wants_json {
+        output::OutputFormat::Json
+    } else {
+        output::OutputFormat::Text
+    });
+
+    // 先尝试解析 CLI；如果失败，JSON 模式下也输出稳定结构，而不是直接抛给 clap 默认渲染。
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if wants_json {
+                match error.kind() {
+                    ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+                        output::emit_result(
+                            "cli",
+                            "CLI help requested",
+                            json!({ "text": error.to_string() }),
+                        );
+                        std::process::exit(0);
+                    }
+                    _ => output::emit_cli_parse_error(&error.to_string()),
+                }
+            } else {
+                error.exit();
+            }
+            std::process::exit(2);
+        }
+    };
+
+    output::init(cli.output_format.into());
+
     // 统一在这里分发所有命令，避免业务逻辑散落在 main 中。
-    let cli = Cli::parse();
-    match cli {
-        Cli::Init {
+    let (command_name, result) = match cli.command {
+        Command::Init {
             name,
             width,
             height,
             fps,
             output,
-        } => commands::init::run(&name, width, height, fps, &output),
-        Cli::Generate { project, output } => commands::generate::run(&project, &output),
-        Cli::GenerateDemo {
+        } => ("init", commands::init::run(&name, width, height, fps, &output)),
+        Command::Generate { project, output } => {
+            ("generate", commands::generate::run(&project, &output))
+        }
+        Command::GenerateDemo {
             name,
             video,
             dubbing,
@@ -167,22 +235,28 @@ fn main() -> anyhow::Result<()> {
             subtitle,
             watermark,
             output,
-        } => commands::generate_demo::run(
-            &name, &video, &dubbing, &bgm, &subtitle, &watermark, &output,
+        } => (
+            "generate-demo",
+            commands::generate_demo::run(
+                &name, &video, &dubbing, &bgm, &subtitle, &watermark, &output,
+            ),
         ),
-        Cli::VodJsonToDraft {
+        Command::VodJsonToDraft {
             config,
             assets_dir,
             output,
             name,
-        } => commands::vod_json_to_draft::run(
-            &config,
-            assets_dir.as_deref(),
-            &output,
-            name.as_deref(),
+        } => (
+            "vod-json-to-draft",
+            commands::vod_json_to_draft::run(
+                &config,
+                assets_dir.as_deref(),
+                &output,
+                name.as_deref(),
+            ),
         ),
-        Cli::Inspect { draft } => commands::inspect::run(&draft),
-        Cli::TemplateReplaceMaterialName {
+        Command::Inspect { draft } => ("inspect", commands::inspect::run(&draft)),
+        Command::TemplateReplaceMaterialName {
             draft,
             target_name,
             media_type,
@@ -190,16 +264,19 @@ fn main() -> anyhow::Result<()> {
             material_name,
             replace_crop,
             output,
-        } => commands::template_replace_material_name::run(
-            &draft,
-            &target_name,
-            media_type,
-            &source,
-            material_name.as_deref(),
-            replace_crop,
-            output.as_deref(),
+        } => (
+            "template-replace-material-name",
+            commands::template_replace_material_name::run(
+                &draft,
+                &target_name,
+                media_type,
+                &source,
+                material_name.as_deref(),
+                replace_crop,
+                output.as_deref(),
+            ),
         ),
-        Cli::TemplateReplaceMaterialSeg {
+        Command::TemplateReplaceMaterialSeg {
             draft,
             track_kind,
             track_name,
@@ -211,20 +288,23 @@ fn main() -> anyhow::Result<()> {
             source_start,
             source_duration,
             output,
-        } => commands::template_replace_material_seg::run(
-            &draft,
-            track_kind,
-            track_name.as_deref(),
-            track_index,
-            segment_index,
-            media_type,
-            &source,
-            material_name.as_deref(),
-            source_start.as_deref(),
-            source_duration.as_deref(),
-            output.as_deref(),
+        } => (
+            "template-replace-material-seg",
+            commands::template_replace_material_seg::run(
+                &draft,
+                track_kind,
+                track_name.as_deref(),
+                track_index,
+                segment_index,
+                media_type,
+                &source,
+                material_name.as_deref(),
+                source_start.as_deref(),
+                source_duration.as_deref(),
+                output.as_deref(),
+            ),
         ),
-        Cli::TemplateReplaceText {
+        Command::TemplateReplaceText {
             draft,
             track_name,
             track_index,
@@ -232,19 +312,30 @@ fn main() -> anyhow::Result<()> {
             text,
             recalc_style,
             output,
-        } => commands::template_replace_text::run(
-            &draft,
-            track_name.as_deref(),
-            track_index,
-            segment_index,
-            &text,
-            recalc_style,
-            output.as_deref(),
+        } => (
+            "template-replace-text",
+            commands::template_replace_text::run(
+                &draft,
+                track_name.as_deref(),
+                track_index,
+                segment_index,
+                &text,
+                recalc_style,
+                output.as_deref(),
+            ),
         ),
-        Cli::TemplateDuplicate {
+        Command::TemplateDuplicate {
             template_dir,
             output_dir,
             allow_replace,
-        } => commands::template_duplicate::run(&template_dir, &output_dir, allow_replace),
+        } => (
+            "template-duplicate",
+            commands::template_duplicate::run(&template_dir, &output_dir, allow_replace),
+        ),
+    };
+
+    if let Err(error) = result {
+        output::emit_error(Some(command_name), &error);
+        std::process::exit(1);
     }
 }

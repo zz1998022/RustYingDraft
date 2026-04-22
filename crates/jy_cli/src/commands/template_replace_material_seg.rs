@@ -2,6 +2,9 @@ use anyhow::Result;
 use camino::Utf8Path;
 use jy_schema::{tim, TimeRange, TrackKind};
 use jy_template::{ExtendMode, ReplacementMaterial, ShrinkMode, TemplateDraft, TrackSelector};
+use serde_json::json;
+
+use crate::output;
 
 /// 将 CLI 层的轨道参数转换为 schema 层的轨道类型。
 fn to_track_kind(arg: crate::EditableTrackKindArg) -> TrackKind {
@@ -62,10 +65,36 @@ pub fn run(
 
     if let Some(output_path) = output {
         draft.write_to(output_path)?;
-        println!("Updated template written to: {}", output_path);
+        output::emit_result(
+            "template-replace-material-seg",
+            &format!("Updated template written to: {output_path}"),
+            json!({
+                "draft_path": draft_path.as_str(),
+                "output_path": output_path.as_str(),
+                "track_kind": format!("{:?}", to_track_kind(track_kind)),
+                "track_name": track_name,
+                "track_index": track_index,
+                "segment_index": segment_index,
+                "source": source.as_str(),
+                "in_place": false,
+            }),
+        );
     } else {
         draft.save()?;
-        println!("Updated template in place: {}", draft_path);
+        output::emit_result(
+            "template-replace-material-seg",
+            &format!("Updated template in place: {draft_path}"),
+            json!({
+                "draft_path": draft_path.as_str(),
+                "output_path": draft_path.as_str(),
+                "track_kind": format!("{:?}", to_track_kind(track_kind)),
+                "track_name": track_name,
+                "track_index": track_index,
+                "segment_index": segment_index,
+                "source": source.as_str(),
+                "in_place": true,
+            }),
+        );
     }
 
     Ok(())

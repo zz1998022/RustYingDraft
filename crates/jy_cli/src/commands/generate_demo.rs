@@ -8,7 +8,10 @@ use jy_schema::{
 };
 use jy_timeline::builder::ProjectBuilder;
 use jy_timeline::clip::{make_audio_clip, make_image_clip, make_text_clip, make_video_clip};
+use serde_json::json;
 use uuid::Uuid;
+
+use crate::output;
 
 /// 解析后的 SRT 字幕片段。
 ///
@@ -54,6 +57,7 @@ pub fn run(
     if subtitle_cues.is_empty() {
         bail!("subtitle file contained no cues: {subtitle}");
     }
+    let subtitle_count = subtitle_cues.len();
 
     // 当前 demo 直接沿用主视频的尺寸作为草稿画布。
     let duration = video_mat.duration;
@@ -168,8 +172,29 @@ pub fn run(
     }
 
     let project = builder.build();
+    let summary = json!({
+        "draft_dir": output.as_str(),
+        "name": name,
+        "duration": project.duration,
+        "track_count": project.tracks.len(),
+        "video_material_count": project.video_materials.len(),
+        "audio_material_count": project.audio_materials.len(),
+        "subtitle_count": subtitle_count,
+        "inputs": {
+            "video": video.as_str(),
+            "dubbing": dubbing.as_str(),
+            "bgm": bgm.as_str(),
+            "subtitle": subtitle.as_str(),
+            "watermark": watermark.as_str(),
+        }
+    });
+
     write_draft(&project, output)?;
-    println!("Generated demo draft: {output}");
+    output::emit_result(
+        "generate-demo",
+        &format!("Generated demo draft: {output}"),
+        summary,
+    );
     Ok(())
 }
 

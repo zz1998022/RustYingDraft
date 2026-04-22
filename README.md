@@ -25,6 +25,9 @@ YingDraft 是一个用 Rust 编写的剪映草稿生成与编辑工具集。
 4. 处理本地视频、音频、图片、字幕等素材
 5. 生成兼容 mac / Windows 剪映的草稿入口文件，并自动将素材本地化到草稿目录
 6. 作为 CLI 被后端或桌面应用调用
+7. CLI 同时支持面向人工终端的文本输出和面向后端调用的 JSON 输出
+8. VOD 远程素材下载时可输出下载进度和素材落盘位置
+9. 仓库内置 GitHub Actions 多平台构建工作流与统一启动脚本，便于快速打包部署
 
 ## 项目结构
 
@@ -98,6 +101,12 @@ cargo test
 cargo run -p jy_cli -- --help
 ```
 
+如果你准备把 CLI 给 Java / Go / Node 后端调用，也可以直接使用 JSON 输出模式：
+
+```powershell
+cargo run -p jy_cli -- --output-format json --help
+```
+
 ## 常用命令
 
 ### 初始化一个空 manifest
@@ -131,6 +140,26 @@ cargo run -p jy_cli -- generate-demo --help
 cargo run -p jy_cli -- vod-json-to-draft --help
 ```
 
+### 面向后端的 JSON 输出
+
+所有命令都支持：
+
+```powershell
+cargo run -p jy_cli -- --output-format json <subcommand> ...
+```
+
+例如：
+
+```powershell
+cargo run -p jy_cli -- --output-format json generate --project ./project.json --output ./draft_out
+```
+
+在这个模式下：
+
+- 成功会输出单行 JSON 结果
+- 失败会输出单行 JSON 错误
+- `vod-json-to-draft` 会持续输出 JSON 进度事件，方便后端实时读取下载状态
+
 ## 部署建议
 
 当前最适合的部署形态是：
@@ -144,6 +173,20 @@ cargo run -p jy_cli -- vod-json-to-draft --help
 1. 服务端生成 timeline / manifest / 项目包
 2. 本地工具在用户机器上重写绝对路径
 3. 本地工具生成最终草稿
+
+如果你需要快速打包 Linux / macOS / Windows 产物，仓库里已经提供：
+
+- `.github/workflows/build-release-bundles.yml`
+  - 在 GitHub Actions 中生成三平台发布包 artifact
+- `scripts/run-jy.ps1`
+- `scripts/run-jy.sh`
+  - 统一从发布包目录启动 CLI
+- `scripts/check-env.ps1`
+- `scripts/check-env.sh`
+  - 快速检查 `jy_cli` 和 `ffprobe` 是否就绪
+- `scripts/install-jy.ps1`
+- `scripts/install-jy.sh`
+  - 从发布包一键安装到当前用户目录
 
 ## 文档
 

@@ -1,6 +1,9 @@
 use anyhow::Result;
 use camino::Utf8Path;
 use jy_template::{ReplacementMaterial, TemplateDraft};
+use serde_json::json;
+
+use crate::output;
 
 /// 按素材名替换模板中的素材。
 ///
@@ -29,10 +32,32 @@ pub fn run(
     draft.replace_material_by_name(target_name, &material, replace_crop)?;
     if let Some(output_path) = output {
         draft.write_to(output_path)?;
-        println!("Updated template written to: {}", output_path);
+        output::emit_result(
+            "template-replace-material-name",
+            &format!("Updated template written to: {output_path}"),
+            json!({
+                "draft_path": draft_path.as_str(),
+                "output_path": output_path.as_str(),
+                "target_name": target_name,
+                "source": source.as_str(),
+                "replace_crop": replace_crop,
+                "in_place": false,
+            }),
+        );
     } else {
         draft.save()?;
-        println!("Updated template in place: {}", draft_path);
+        output::emit_result(
+            "template-replace-material-name",
+            &format!("Updated template in place: {draft_path}"),
+            json!({
+                "draft_path": draft_path.as_str(),
+                "output_path": draft_path.as_str(),
+                "target_name": target_name,
+                "source": source.as_str(),
+                "replace_crop": replace_crop,
+                "in_place": true,
+            }),
+        );
     }
     Ok(())
 }

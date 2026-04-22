@@ -3,7 +3,10 @@ use camino::Utf8Path;
 use jy_draft::writer::write_draft;
 use jy_schema::{AudioMaterialRef, Canvas, Project, Track, VideoMaterialRef};
 use serde::Deserialize;
+use serde_json::json;
 use uuid::Uuid;
+
+use crate::output;
 
 /// `generate` 命令读取的 manifest 结构。
 ///
@@ -31,8 +34,8 @@ fn default_maintrack_adsorb() -> bool {
 }
 
 /// 根据 manifest 直接生成剪映草稿。
-pub fn run(project: &Utf8Path, output: &Utf8Path) -> Result<()> {
-    let content = std::fs::read_to_string(project)?;
+pub fn run(project_path: &Utf8Path, output: &Utf8Path) -> Result<()> {
+    let content = std::fs::read_to_string(project_path)?;
     let manifest: ProjectManifest = serde_json::from_str(&content)?;
 
     // 如果外部没有显式给出工程总时长，则根据所有片段的结束时间自动推导。
@@ -58,7 +61,24 @@ pub fn run(project: &Utf8Path, output: &Utf8Path) -> Result<()> {
         duration: manifest.duration.unwrap_or(inferred_duration),
     };
 
+    // 在写草稿前先把摘要提取出来，避免后面对象被 move 之后还要重新解析一遍。
+    let summary = json!({
+        "project_path": project_path.as_str(),
+        "draft_dir": output.as_str(),
+        "project_id": project.id.clone(),
+        "name": project.name.clone(),
+        "duration": project.duration,
+        "track_count": project.tracks.len(),
+        "video_material_count": project.video_materials.len(),
+        "audio_material_count": project.audio_materials.len(),
+        "canvas": {
+            "width": project.canvas.width,
+            "height": project.canvas.height,
+            "fps": project.canvas.fps,
+        }
+    });
+
     write_draft(&project, output)?;
-    println!("Generated draft: {}", output);
+    output::emit_result("generate", &format!("Generated draft: {output}"), summary);
     Ok(())
 }

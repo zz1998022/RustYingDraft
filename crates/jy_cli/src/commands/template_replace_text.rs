@@ -1,6 +1,9 @@
 use anyhow::Result;
 use camino::Utf8Path;
 use jy_template::{TemplateDraft, TrackSelector};
+use serde_json::json;
+
+use crate::output;
 
 /// 替换模板中的文本片段。
 ///
@@ -28,10 +31,36 @@ pub fn run(
 
     if let Some(output_path) = output {
         draft.write_to(output_path)?;
-        println!("Updated template written to: {}", output_path);
+        output::emit_result(
+            "template-replace-text",
+            &format!("Updated template written to: {output_path}"),
+            json!({
+                "draft_path": draft_path.as_str(),
+                "output_path": output_path.as_str(),
+                "track_name": track_name,
+                "track_index": track_index,
+                "segment_index": segment_index,
+                "text_count": text.len(),
+                "recalc_style": recalc_style,
+                "in_place": false,
+            }),
+        );
     } else {
         draft.save()?;
-        println!("Updated template in place: {}", draft_path);
+        output::emit_result(
+            "template-replace-text",
+            &format!("Updated template in place: {draft_path}"),
+            json!({
+                "draft_path": draft_path.as_str(),
+                "output_path": draft_path.as_str(),
+                "track_name": track_name,
+                "track_index": track_index,
+                "segment_index": segment_index,
+                "text_count": text.len(),
+                "recalc_style": recalc_style,
+                "in_place": true,
+            }),
+        );
     }
 
     Ok(())

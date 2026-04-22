@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -15,7 +15,10 @@ use jy_timeline::builder::ProjectBuilder;
 use jy_timeline::clip::{make_audio_clip, make_image_clip, make_text_clip, make_video_clip};
 use reqwest::blocking::Client;
 use serde::Deserialize;
+use serde_json::json;
 use url::Url;
+
+use crate::output;
 
 /// 阿里云 VOD 导出的顶层时间轴结构。
 ///
@@ -174,6 +177,7 @@ pub fn run(
 ) -> Result<()> {
     let content = std::fs::read_to_string(config)?;
     let project: VodProject = serde_json::from_str(&content)?;
+    let remote_sources = collect_remote_sources(&project);
 
     // 所有远程素材都会先落到本地，因为剪映草稿依赖本机绝对路径。
     let assets_dir = assets_dir
@@ -192,7 +196,33 @@ pub fn run(
         .build()
         .context("failed to create HTTP client")?;
 
-    let mut fetcher = AssetFetcher::new(client, assets_dir);
+    if remote_sources.is_empty() {
+        output::emit_progress(
+            "vod-json-to-draft",
+            "resolve-assets",
+            "No remote assets found in VOD config. Using local paths directly.",
+            json!({
+                "remote_asset_count": 0,
+                "assets_dir": assets_dir.as_str(),
+            }),
+        );
+    } else {
+        output::emit_progress(
+            "vod-json-to-draft",
+            "resolve-assets",
+            &format!(
+                "Preparing to resolve {} remote assets into: {}",
+                remote_sources.len(),
+                assets_dir
+            ),
+            json!({
+                "remote_asset_count": remote_sources.len(),
+                "assets_dir": assets_dir.as_str(),
+            }),
+        );
+    }
+
+    let mut fetcher = AssetFetcher::new(client, assets_dir, remote_sources.len());
 
     // 先用字幕轨估一个总时长，后面在读视频/音频时继续取最大值。
     let mut duration = project
@@ -362,8 +392,67 @@ pub fn run(
 
     let draft = builder.build();
     write_draft(&draft, output)?;
-    println!("Generated draft from VOD JSON: {output}");
+    if fetcher.remote_total() > 0 {
+        output::emit_progress(
+            "vod-json-to-draft",
+            "resolve-assets",
+            &format!(
+                "Resolved remote assets: {}/{}",
+                fetcher.completed_downloads(),
+                fetcher.remote_total()
+            ),
+            json!({
+                "resolved_remote_assets": fetcher.completed_downloads(),
+                "remote_asset_count": fetcher.remote_total(),
+            }),
+        );
+    }
+    output::emit_result(
+        "vod-json-to-draft",
+        &format!("Generated draft from VOD JSON: {output}"),
+        json!({
+            "config_path": config.as_str(),
+            "draft_dir": output.as_str(),
+            "assets_dir": fetcher.assets_dir().as_str(),
+            "name": project_name,
+            "duration": draft.duration,
+            "video_track_count": draft.tracks.iter().filter(|track| track.kind == TrackKind::Video).count(),
+            "audio_track_count": draft.tracks.iter().filter(|track| track.kind == TrackKind::Audio).count(),
+            "text_track_count": draft.tracks.iter().filter(|track| track.kind == TrackKind::Text).count(),
+            "video_material_count": draft.video_materials.len(),
+            "audio_material_count": draft.audio_materials.len(),
+            "remote_asset_count": fetcher.remote_total(),
+            "resolved_remote_assets": fetcher.completed_downloads(),
+        }),
+    );
     Ok(())
+}
+
+/// 预扫描 VOD 配置中的远程素材 URL，便于展示总进度。
+fn collect_remote_sources(project: &VodProject) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut ordered = Vec::new();
+
+    let mut push_source = |source: &str| {
+        if (source.starts_with("http://") || source.starts_with("https://"))
+            && seen.insert(source.to_string())
+        {
+            ordered.push(source.to_string());
+        }
+    };
+
+    for track in &project.video_tracks {
+        for clip in &track.clips {
+            push_source(&clip.media_url);
+        }
+    }
+    for track in &project.audio_tracks {
+        for clip in &track.clips {
+            push_source(&clip.media_url);
+        }
+    }
+
+    ordered
 }
 
 /// 解析 VOD 画布信息，优先使用 FECanvas，其次使用输出分辨率。
@@ -497,16 +586,32 @@ struct AssetFetcher {
     client: Client,
     assets_dir: Utf8PathBuf,
     downloads: HashMap<String, Utf8PathBuf>,
+    remote_total: usize,
+    completed_remote: usize,
 }
 
 impl AssetFetcher {
     /// 创建一个素材抓取器。
-    fn new(client: Client, assets_dir: Utf8PathBuf) -> Self {
+    fn new(client: Client, assets_dir: Utf8PathBuf, remote_total: usize) -> Self {
         Self {
             client,
             assets_dir,
             downloads: HashMap::new(),
+            remote_total,
+            completed_remote: 0,
         }
+    }
+
+    fn remote_total(&self) -> usize {
+        self.remote_total
+    }
+
+    fn completed_downloads(&self) -> usize {
+        self.completed_remote
+    }
+
+    fn assets_dir(&self) -> &Utf8Path {
+        &self.assets_dir
     }
 
     /// 解析一个视频或图片 URL/路径为本地视频素材引用。
@@ -540,16 +645,59 @@ impl AssetFetcher {
     }
 
     /// 下载远程素材到素材目录。
-    fn download_remote(&self, source: &str) -> Result<Utf8PathBuf> {
+    fn download_remote(&mut self, source: &str) -> Result<Utf8PathBuf> {
         let url = Url::parse(source)?;
         let file_name = build_remote_file_name(&url);
         let path = self.assets_dir.join(file_name);
+        let ordinal = self.completed_remote + 1;
 
         if path.exists() {
+            output::emit_progress(
+                "vod-json-to-draft",
+                "reuse-asset",
+                &format!(
+                    "[asset {}/{}] Reusing existing file: {}",
+                    ordinal, self.remote_total, path
+                ),
+                json!({
+                    "ordinal": ordinal,
+                    "total_assets": self.remote_total,
+                    "source": source,
+                    "path": path.as_str(),
+                    "reused": true,
+                }),
+            );
+            self.completed_remote += 1;
             return Ok(path);
         }
 
         std::fs::create_dir_all(&self.assets_dir)?;
+        output::emit_progress(
+            "vod-json-to-draft",
+            "download-asset",
+            &format!(
+                "[asset {}/{}] Downloading: {}",
+                ordinal, self.remote_total, source
+            ),
+            json!({
+                "ordinal": ordinal,
+                "total_assets": self.remote_total,
+                "source": source,
+                "path": path.as_str(),
+            }),
+        );
+        output::emit_progress(
+            "vod-json-to-draft",
+            "save-asset",
+            &format!("Saving to: {}", path),
+            json!({
+                "ordinal": ordinal,
+                "total_assets": self.remote_total,
+                "source": source,
+                "path": path.as_str(),
+            }),
+        );
+
         let mut response = self
             .client
             .get(source)
@@ -557,15 +705,124 @@ impl AssetFetcher {
             .with_context(|| format!("failed to download asset: {source}"))?
             .error_for_status()
             .with_context(|| format!("remote asset returned error: {source}"))?;
+        let total_bytes = response.content_length();
 
         let mut file = File::create(path.as_std_path())?;
-        let bytes = response.copy_to(&mut file)?;
+        let mut downloaded: u64 = 0;
+        let mut buffer = [0u8; 64 * 1024];
+        let mut next_report_at = total_bytes
+            .map(|total| (total / 20).max(1))
+            .unwrap_or(2 * 1024 * 1024);
+
+        loop {
+            let read = response.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..read])?;
+            downloaded += read as u64;
+
+            if downloaded >= next_report_at {
+                print_download_progress(ordinal, self.remote_total, source, &path, downloaded, total_bytes);
+                next_report_at = total_bytes
+                    .map(|total| (next_report_at + (total / 20).max(1)).min(total))
+                    .unwrap_or(next_report_at + 2 * 1024 * 1024);
+            }
+        }
         file.flush()?;
-        if bytes == 0 {
+        if downloaded == 0 {
             bail!("downloaded empty asset from {source}");
         }
 
+        print_download_progress(ordinal, self.remote_total, source, &path, downloaded, total_bytes);
+        output::emit_progress(
+            "vod-json-to-draft",
+            "asset-finished",
+            &format!("[asset {}/{}] Finished: {}", ordinal, self.remote_total, path),
+            json!({
+                "ordinal": ordinal,
+                "total_assets": self.remote_total,
+                "source": source,
+                "path": path.as_str(),
+                "bytes": downloaded,
+            }),
+        );
+        self.completed_remote += 1;
+
         Ok(path)
+    }
+}
+
+fn print_download_progress(
+    ordinal: usize,
+    total_assets: usize,
+    source: &str,
+    path: &Utf8Path,
+    downloaded: u64,
+    total_bytes: Option<u64>,
+) {
+    if let Some(total_bytes) = total_bytes {
+        let percent = if total_bytes == 0 {
+            100.0
+        } else {
+            downloaded as f64 / total_bytes as f64 * 100.0
+        };
+        output::emit_progress(
+            "vod-json-to-draft",
+            "download-progress",
+            &format!(
+                "[asset {}/{}] {:.1}% ({}/{})",
+                ordinal,
+                total_assets,
+                percent.clamp(0.0, 100.0),
+                format_bytes(downloaded),
+                format_bytes(total_bytes)
+            ),
+            json!({
+                "ordinal": ordinal,
+                "total_assets": total_assets,
+                "source": source,
+                "path": path.as_str(),
+                "downloaded_bytes": downloaded,
+                "total_bytes": total_bytes,
+                "percent": percent.clamp(0.0, 100.0),
+            }),
+        );
+    } else {
+        output::emit_progress(
+            "vod-json-to-draft",
+            "download-progress",
+            &format!(
+                "[asset {}/{}] Downloaded {}",
+                ordinal,
+                total_assets,
+                format_bytes(downloaded)
+            ),
+            json!({
+                "ordinal": ordinal,
+                "total_assets": total_assets,
+                "source": source,
+                "path": path.as_str(),
+                "downloaded_bytes": downloaded,
+            }),
+        );
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+
+    let bytes_f = bytes as f64;
+    if bytes_f >= GB {
+        format!("{:.2} GB", bytes_f / GB)
+    } else if bytes_f >= MB {
+        format!("{:.2} MB", bytes_f / MB)
+    } else if bytes_f >= KB {
+        format!("{:.2} KB", bytes_f / KB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -610,5 +867,55 @@ mod tests {
     fn parses_hex_rgb() {
         assert_eq!(parse_hex_rgb("#ffffff"), (1.0, 1.0, 1.0));
         assert_eq!(parse_hex_rgb("#000000"), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn collects_unique_remote_sources() {
+        let project = VodProject {
+            fe_canvas: None,
+            output_media_config: None,
+            subtitle_tracks: vec![],
+            video_tracks: vec![VodVideoTrack {
+                clips: vec![
+                    VodVisualClip {
+                        clip_type: None,
+                        media_url: "https://example.com/a.mp4".to_string(),
+                        timeline_in: None,
+                        timeline_out: None,
+                        adapt_mode: None,
+                        x: None,
+                        y: None,
+                        width: None,
+                        height: None,
+                    },
+                    VodVisualClip {
+                        clip_type: None,
+                        media_url: "https://example.com/a.mp4".to_string(),
+                        timeline_in: None,
+                        timeline_out: None,
+                        adapt_mode: None,
+                        x: None,
+                        y: None,
+                        width: None,
+                        height: None,
+                    },
+                ],
+            }],
+            audio_tracks: vec![VodAudioTrack {
+                clips: vec![VodAudioClipDef {
+                    media_url: "https://example.com/b.wav".to_string(),
+                    timeline_in: None,
+                    timeline_out: None,
+                }],
+            }],
+        };
+
+        assert_eq!(
+            collect_remote_sources(&project),
+            vec![
+                "https://example.com/a.mp4".to_string(),
+                "https://example.com/b.wav".to_string()
+            ]
+        );
     }
 }

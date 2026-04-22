@@ -1,0 +1,94 @@
+name: Build Release Bundles
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    name: Build ${{ matrix.bundle_name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            bundle_name: yingdraft-windows-x64
+            binary_name: jy_cli.exe
+          - runner: ubuntu-latest
+            bundle_name: yingdraft-linux-x64
+            binary_name: jy_cli
+          - runner: macos-15-intel
+            bundle_name: yingdraft-macos-x64
+            binary_name: jy_cli
+          - runner: macos-15
+            bundle_name: yingdraft-macos-arm64
+            binary_name: jy_cli
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI
+        run: cargo build -p jy_cli --release
+
+      - name: Prepare bundle
+        shell: pwsh
+        run: |
+          # 统一生成发布目录结构，便于 Windows / Linux / macOS 采用相同的部署方式。
+          $bundleRoot = Join-Path $PWD "dist/${{ matrix.bundle_name }}"
+          $binDir = Join-Path $bundleRoot "bin"
+          $scriptsDir = Join-Path $bundleRoot "scripts"
+          $docsDir = Join-Path $bundleRoot "docs"
+          $workDir = Join-Path $bundleRoot "work"
+          $logsDir = Join-Path $bundleRoot "logs"
+
+          New-Item -ItemType Directory -Force -Path $binDir, $scriptsDir, $docsDir, $workDir, $logsDir | Out-Null
+
+          Copy-Item "target/release/${{ matrix.binary_name }}" (Join-Path $binDir "${{ matrix.binary_name }}") -Force
+          Copy-Item "scripts/run-jy.ps1" (Join-Path $scriptsDir "run-jy.ps1") -Force
+          Copy-Item "scripts/run-jy.sh" (Join-Path $scriptsDir "run-jy.sh") -Force
+          Copy-Item "scripts/check-env.ps1" (Join-Path $scriptsDir "check-env.ps1") -Force
+          Copy-Item "scripts/check-env.sh" (Join-Path $scriptsDir "check-env.sh") -Force
+          Copy-Item "scripts/install-jy.ps1" (Join-Path $scriptsDir "install-jy.ps1") -Force
+          Copy-Item "scripts/install-jy.sh" (Join-Path $scriptsDir "install-jy.sh") -Force
+          Copy-Item "README.md" (Join-Path $bundleRoot "README.md") -Force
+          Copy-Item "docs/使用文档.md" (Join-Path $docsDir "使用文档.md") -Force
+          Copy-Item "docs/部署文档.md" (Join-Path $docsDir "部署文档.md") -Force
+          Copy-Item "docs/Manifest规范.md" (Join-Path $docsDir "Manifest规范.md") -Force
+
+          @'
+          将 ffprobe 放到当前 bin 目录后，再通过 scripts/run-jy.ps1 或 scripts/run-jy.sh 调用 CLI。
+          建议保持目录结构不变：
+
+          YingDraft/
+            bin/
+              jy_cli(.exe)
+              ffprobe(.exe)
+            scripts/
+            docs/
+            work/
+            logs/
+          '@ | Set-Content (Join-Path $binDir "README.txt") -Encoding UTF8
+
+          if (-not $IsWindows) {
+            chmod +x (Join-Path $binDir "${{ matrix.binary_name }}")
+            chmod +x (Join-Path $scriptsDir "run-jy.sh")
+            chmod +x (Join-Path $scriptsDir "check-env.sh")
+            chmod +x (Join-Path $scriptsDir "install-jy.sh")
+          }
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bundle_name }}
+          path: dist/${{ matrix.bundle_name }}
