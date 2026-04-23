@@ -69,7 +69,7 @@ curl -fL --retry 3 --connect-timeout 15 "$url" -o "$tmp_dir/$asset"
 echo "正在解压..."
 tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
 
-bundle_dir="$(find "$tmp_dir" -maxdepth 2 -type f -path '*/scripts/install-jy.sh' -print -quit)"
+bundle_dir="$(find "$tmp_dir" -maxdepth 3 -type f -path '*/scripts/install-jy.sh' -print -quit)"
 if [[ -z "$bundle_dir" ]]; then
   echo "发布包结构不正确，未找到 scripts/install-jy.sh。" >&2
   exit 1
