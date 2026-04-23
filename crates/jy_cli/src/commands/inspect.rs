@@ -58,11 +58,7 @@ pub fn run(draft: &Utf8Path) -> Result<()> {
     let summary = build_summary(draft)?;
 
     if output::is_json() {
-        output::emit_result(
-            "inspect",
-            &format!("Inspected draft: {draft}"),
-            &summary,
-        );
+        output::emit_result("inspect", &format!("Inspected draft: {draft}"), &summary);
         return Ok(());
     }
 

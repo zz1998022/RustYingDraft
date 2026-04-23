@@ -2,10 +2,20 @@ name: Build Release Bundles
 
 on:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "可选。填写 v0.1.0 这类版本号时创建/更新 GitHub Release；留空则只构建 Artifacts。"
+        required: false
+        type: string
   push:
     branches:
       - main
+    tags:
+      - "v*"
   pull_request:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -61,10 +71,12 @@ jobs:
           Copy-Item "scripts/check-env.sh" (Join-Path $scriptsDir "check-env.sh") -Force
           Copy-Item "scripts/install-jy.ps1" (Join-Path $scriptsDir "install-jy.ps1") -Force
           Copy-Item "scripts/install-jy.sh" (Join-Path $scriptsDir "install-jy.sh") -Force
+          Copy-Item "scripts/install.sh" (Join-Path $scriptsDir "install.sh") -Force
           Copy-Item "README.md" (Join-Path $bundleRoot "README.md") -Force
           Copy-Item "docs/使用文档.md" (Join-Path $docsDir "使用文档.md") -Force
           Copy-Item "docs/部署文档.md" (Join-Path $docsDir "部署文档.md") -Force
           Copy-Item "docs/Manifest规范.md" (Join-Path $docsDir "Manifest规范.md") -Force
+          Copy-Item "docs/Bundle规范.md" (Join-Path $docsDir "Bundle规范.md") -Force
 
           @'
           将 ffprobe 放到当前 bin 目录后，再通过 scripts/run-jy.ps1 或 scripts/run-jy.sh 调用 CLI。
@@ -85,10 +97,82 @@ jobs:
             chmod +x (Join-Path $scriptsDir "run-jy.sh")
             chmod +x (Join-Path $scriptsDir "check-env.sh")
             chmod +x (Join-Path $scriptsDir "install-jy.sh")
+            chmod +x (Join-Path $scriptsDir "install.sh")
           }
+
+      - name: Create archive
+        shell: bash
+        run: |
+          cd dist
+          tar -czf "${{ matrix.bundle_name }}.tar.gz" "${{ matrix.bundle_name }}"
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.bundle_name }}
-          path: dist/${{ matrix.bundle_name }}
+          path: |
+            dist/${{ matrix.bundle_name }}
+            dist/${{ matrix.bundle_name }}.tar.gz
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '')
+    permissions:
+      contents: write
+    steps:
+      - name: Download bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ github.event.inputs.release_version }}"
+          fi
+
+          tag="$(echo "$tag" | xargs)"
+
+          if [[ -z "$tag" ]]; then
+            echo "release_version 为空，无法发布 Release。" >&2
+            exit 1
+          fi
+
+          if [[ "$tag" != v* ]]; then
+            echo "release_version 必须以 v 开头，例如 v0.1.0。" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          mkdir -p release-upload
+          find release-assets -name "yingdraft-*.tar.gz" -type f -exec cp {} release-upload/ \;
+          ls -lh release-upload
+          count="$(find release-upload -name "yingdraft-*.tar.gz" -type f | wc -l | tr -d ' ')"
+          if [[ "$count" -ne 4 ]]; then
+            echo "预期 4 个发布包，实际找到 $count 个。" >&2
+            exit 1
+          fi
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 \
+            || gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TAG" \
+              --notes "YingDraft $RELEASE_TAG" \
+              --target "$GITHUB_SHA"
+          gh release upload "$RELEASE_TAG" release-upload/*.tar.gz --clobber

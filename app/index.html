@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YingDraft Companion</title>
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="hero">
+        <p class="eyebrow">YingDraft Companion</p>
+        <h1>把下载好的项目，一键变成能在剪映里打开的草稿。</h1>
+        <p class="lede">选项目包，选草稿箱，点一下开始生成。剩下的交给它。</p>
+        <div class="hero-card">
+          <strong>适合剪辑师直接使用</strong>
+          <p>支持 Windows 和 macOS，尽量少配置，尽量少理解成本。</p>
+        </div>
+
+        <p class="credit">Created by LemonChan · Dramabyte</p>
+      </aside>
+
+      <main class="panel">
+        <section class="card">
+          <div class="section-header">
+            <p class="section-kicker">Step 1</p>
+            <h2>选项目</h2>
+          </div>
+
+          <div class="picker-row">
+            <button id="detect-source-nearby" class="button button-secondary">读取同目录项目</button>
+            <button id="pick-source-file" class="button button-primary">选择项目包 / bundle.json</button>
+            <button id="pick-source-dir" class="button button-secondary">选择项目目录</button>
+          </div>
+
+          <label class="field">
+            <span>项目位置</span>
+            <input id="source-path" type="text" placeholder="选择项目包、项目目录或 bundle.json" />
+          </label>
+
+          <button id="inspect-source" class="button button-ghost">检查项目</button>
+
+          <div id="bundle-summary" class="summary empty">选好后点“检查项目”。</div>
+        </section>
+
+        <section class="card">
+          <div class="section-header">
+            <p class="section-kicker">Step 2</p>
+            <h2>选保存位置</h2>
+          </div>
+
+          <div class="picker-row">
+            <button id="detect-draft-box" class="button button-secondary">自动检测</button>
+            <button id="pick-draft-box" class="button button-secondary">手动选择目录</button>
+          </div>
+
+          <label class="field">
+            <span>剪映草稿箱</span>
+            <input id="draft-box-dir" type="text" placeholder="选择剪映草稿箱目录" />
+          </label>
+
+          <label class="field">
+            <span>输出草稿名</span>
+            <input id="draft-name" type="text" placeholder="给这份草稿起个名字" />
+          </label>
+        </section>
+
+        <section class="card">
+          <div class="section-header">
+            <p class="section-kicker">Step 3</p>
+            <h2>开始生成</h2>
+          </div>
+
+          <button id="run-import" class="button button-primary button-wide">开始生成</button>
+          <p id="status-line" class="status-line">等待开始。</p>
+          <div class="result-actions">
+            <button id="open-draft-dir" class="button button-secondary is-hidden">打开草稿目录</button>
+          </div>
+          <pre id="result-panel" class="result-panel">生成结果会显示在这里。</pre>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

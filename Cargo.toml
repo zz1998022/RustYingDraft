@@ -6,7 +6,9 @@ members = [
     "crates/jy_timeline",
     "crates/jy_draft",
     "crates/jy_template",
+    "crates/jy_bundle",
     "crates/jy_cli",
+    "app/src-tauri",
 ]
 
 [workspace.package]

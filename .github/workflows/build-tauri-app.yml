@@ -1,0 +1,184 @@
+name: Build Tauri App
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "可选。填写 v0.1.0 这类版本号时创建/更新 GitHub Release；留空则只构建 Artifacts。"
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            artifact_name: yingdraft-companion-windows-x64
+          - runner: ubuntu-22.04
+            artifact_name: yingdraft-companion-linux-x64
+          - runner: macos-15-intel
+            artifact_name: yingdraft-companion-macos-x64
+          - runner: macos-15
+            artifact_name: yingdraft-companion-macos-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            pkg-config \
+            wget
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri app
+        working-directory: app
+        run: pnpm tauri build
+
+      - name: Collect bundles
+        shell: bash
+        run: |
+          mkdir -p "dist/${{ matrix.artifact_name }}"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            bundle_root="app/src-tauri/target/release/bundle"
+          else
+            bundle_root="app/src-tauri/target/release/bundle"
+          fi
+
+          if [[ ! -d "$bundle_root" ]]; then
+            echo "未找到 Tauri bundle 输出目录: $bundle_root" >&2
+            exit 1
+          fi
+
+          find "$bundle_root" -type f \
+            ! -name "*.dSYM" \
+            ! -path "*/.DS_Store" \
+            -exec cp {} "dist/${{ matrix.artifact_name }}/" \;
+
+          file_count="$(find "dist/${{ matrix.artifact_name }}" -type f | wc -l | tr -d ' ')"
+          if [[ "$file_count" -eq 0 ]]; then
+            echo "Tauri 没有产出可上传的安装包。" >&2
+            exit 1
+          fi
+
+          cd dist
+          tar -czf "${{ matrix.artifact_name }}.tar.gz" "${{ matrix.artifact_name }}"
+
+      - name: Upload Tauri bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            dist/${{ matrix.artifact_name }}
+            dist/${{ matrix.artifact_name }}.tar.gz
+
+  publish:
+    name: Publish Tauri Release Assets
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '')
+    permissions:
+      contents: write
+    steps:
+      - name: Download bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ github.event.inputs.release_version }}"
+          fi
+
+          tag="$(echo "$tag" | xargs)"
+
+          if [[ -z "$tag" ]]; then
+            echo "release_version 为空，无法发布 Release。" >&2
+            exit 1
+          fi
+
+          if [[ "$tag" != v* ]]; then
+            echo "release_version 必须以 v 开头，例如 v0.1.0。" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          mkdir -p release-upload
+          find release-assets -name "yingdraft-companion-*.tar.gz" -type f -exec cp {} release-upload/ \;
+          ls -lh release-upload
+          count="$(find release-upload -name "yingdraft-companion-*.tar.gz" -type f | wc -l | tr -d ' ')"
+          if [[ "$count" -ne 4 ]]; then
+            echo "预期 4 个桌面端发布包，实际找到 $count 个。" >&2
+            exit 1
+          fi
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 \
+            || gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TAG" \
+              --notes "YingDraft $RELEASE_TAG" \
+              --target "$GITHUB_SHA"
+          gh release upload "$RELEASE_TAG" release-upload/*.tar.gz --clobber

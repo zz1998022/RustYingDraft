@@ -174,6 +174,7 @@ pub fn run(
     assets_dir: Option<&Utf8Path>,
     output: &Utf8Path,
     name: Option<&str>,
+    use_internal_url: bool,
 ) -> Result<()> {
     let content = std::fs::read_to_string(config)?;
     let project: VodProject = serde_json::from_str(&content)?;
@@ -204,6 +205,7 @@ pub fn run(
             json!({
                 "remote_asset_count": 0,
                 "assets_dir": assets_dir.as_str(),
+                "use_internal_url": use_internal_url,
             }),
         );
     } else {
@@ -218,11 +220,12 @@ pub fn run(
             json!({
                 "remote_asset_count": remote_sources.len(),
                 "assets_dir": assets_dir.as_str(),
+                "use_internal_url": use_internal_url,
             }),
         );
     }
 
-    let mut fetcher = AssetFetcher::new(client, assets_dir, remote_sources.len());
+    let mut fetcher = AssetFetcher::new(client, assets_dir, remote_sources.len(), use_internal_url);
 
     // 先用字幕轨估一个总时长，后面在读视频/音频时继续取最大值。
     let mut duration = project
@@ -423,6 +426,7 @@ pub fn run(
             "audio_material_count": draft.audio_materials.len(),
             "remote_asset_count": fetcher.remote_total(),
             "resolved_remote_assets": fetcher.completed_downloads(),
+            "use_internal_url": use_internal_url,
         }),
     );
     Ok(())
@@ -588,17 +592,24 @@ struct AssetFetcher {
     downloads: HashMap<String, Utf8PathBuf>,
     remote_total: usize,
     completed_remote: usize,
+    use_internal_url: bool,
 }
 
 impl AssetFetcher {
     /// 创建一个素材抓取器。
-    fn new(client: Client, assets_dir: Utf8PathBuf, remote_total: usize) -> Self {
+    fn new(
+        client: Client,
+        assets_dir: Utf8PathBuf,
+        remote_total: usize,
+        use_internal_url: bool,
+    ) -> Self {
         Self {
             client,
             assets_dir,
             downloads: HashMap::new(),
             remote_total,
             completed_remote: 0,
+            use_internal_url,
         }
     }
 
@@ -647,6 +658,12 @@ impl AssetFetcher {
     /// 下载远程素材到素材目录。
     fn download_remote(&mut self, source: &str) -> Result<Utf8PathBuf> {
         let url = Url::parse(source)?;
+        let download_url = if self.use_internal_url {
+            rewrite_aliyun_oss_url_to_internal(&url)
+        } else {
+            url.clone()
+        };
+        let internal_rewritten = download_url != url;
         let file_name = build_remote_file_name(&url);
         let path = self.assets_dir.join(file_name);
         let ordinal = self.completed_remote + 1;
@@ -663,8 +680,11 @@ impl AssetFetcher {
                     "ordinal": ordinal,
                     "total_assets": self.remote_total,
                     "source": source,
+                    "download_source": download_url.as_str(),
                     "path": path.as_str(),
                     "reused": true,
+                    "use_internal_url": self.use_internal_url,
+                    "internal_rewritten": internal_rewritten,
                 }),
             );
             self.completed_remote += 1;
@@ -683,7 +703,10 @@ impl AssetFetcher {
                 "ordinal": ordinal,
                 "total_assets": self.remote_total,
                 "source": source,
+                "download_source": download_url.as_str(),
                 "path": path.as_str(),
+                "use_internal_url": self.use_internal_url,
+                "internal_rewritten": internal_rewritten,
             }),
         );
         output::emit_progress(
@@ -694,17 +717,18 @@ impl AssetFetcher {
                 "ordinal": ordinal,
                 "total_assets": self.remote_total,
                 "source": source,
+                "download_source": download_url.as_str(),
                 "path": path.as_str(),
             }),
         );
 
         let mut response = self
             .client
-            .get(source)
+            .get(download_url.as_str())
             .send()
-            .with_context(|| format!("failed to download asset: {source}"))?
+            .with_context(|| format!("failed to download asset: {}", download_url.as_str()))?
             .error_for_status()
-            .with_context(|| format!("remote asset returned error: {source}"))?;
+            .with_context(|| format!("remote asset returned error: {}", download_url.as_str()))?;
         let total_bytes = response.content_length();
 
         let mut file = File::create(path.as_std_path())?;
@@ -723,7 +747,14 @@ impl AssetFetcher {
             downloaded += read as u64;
 
             if downloaded >= next_report_at {
-                print_download_progress(ordinal, self.remote_total, source, &path, downloaded, total_bytes);
+                print_download_progress(
+                    ordinal,
+                    self.remote_total,
+                    source,
+                    &path,
+                    downloaded,
+                    total_bytes,
+                );
                 next_report_at = total_bytes
                     .map(|total| (next_report_at + (total / 20).max(1)).min(total))
                     .unwrap_or(next_report_at + 2 * 1024 * 1024);
@@ -734,23 +765,75 @@ impl AssetFetcher {
             bail!("downloaded empty asset from {source}");
         }
 
-        print_download_progress(ordinal, self.remote_total, source, &path, downloaded, total_bytes);
+        print_download_progress(
+            ordinal,
+            self.remote_total,
+            source,
+            &path,
+            downloaded,
+            total_bytes,
+        );
         output::emit_progress(
             "vod-json-to-draft",
             "asset-finished",
-            &format!("[asset {}/{}] Finished: {}", ordinal, self.remote_total, path),
+            &format!(
+                "[asset {}/{}] Finished: {}",
+                ordinal, self.remote_total, path
+            ),
             json!({
                 "ordinal": ordinal,
                 "total_assets": self.remote_total,
                 "source": source,
+                "download_source": download_url.as_str(),
                 "path": path.as_str(),
                 "bytes": downloaded,
+                "use_internal_url": self.use_internal_url,
+                "internal_rewritten": internal_rewritten,
             }),
         );
         self.completed_remote += 1;
 
         Ok(path)
     }
+}
+
+/// 将阿里云 OSS/VOD 常见公网 Endpoint 改写为同地域内网 Endpoint。
+///
+/// 例如：
+/// `outin-xxx.oss-cn-shanghai.aliyuncs.com`
+/// -> `outin-xxx.oss-cn-shanghai-internal.aliyuncs.com`
+///
+/// 自定义域名、加速域名、已经是 internal 的域名会保持原样。
+fn rewrite_aliyun_oss_url_to_internal(url: &Url) -> Url {
+    let Some(host) = url.host_str() else {
+        return url.clone();
+    };
+    let Some(oss_marker) = host.find(".oss-") else {
+        return url.clone();
+    };
+
+    let oss_start = oss_marker + 1;
+    let endpoint = &host[oss_start..];
+    if !endpoint.ends_with(".aliyuncs.com")
+        || endpoint.contains("-internal.aliyuncs.com")
+        || endpoint.starts_with("oss-accelerate")
+    {
+        return url.clone();
+    }
+
+    let internal_endpoint = endpoint
+        .strip_suffix(".aliyuncs.com")
+        .map(|prefix| format!("{prefix}-internal.aliyuncs.com"));
+    let Some(internal_endpoint) = internal_endpoint else {
+        return url.clone();
+    };
+
+    let new_host = format!("{}{}", &host[..oss_start], internal_endpoint);
+    let mut rewritten = url.clone();
+    if rewritten.set_host(Some(&new_host)).is_err() {
+        return url.clone();
+    }
+    rewritten
 }
 
 fn print_download_progress(
@@ -917,5 +1000,28 @@ mod tests {
                 "https://example.com/b.wav".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn rewrites_aliyun_oss_endpoint_to_internal() {
+        let url =
+            Url::parse("https://outin-123.oss-cn-shanghai.aliyuncs.com/video/a.mp4?Expires=1")
+                .unwrap();
+        let rewritten = rewrite_aliyun_oss_url_to_internal(&url);
+
+        assert_eq!(
+            rewritten.as_str(),
+            "https://outin-123.oss-cn-shanghai-internal.aliyuncs.com/video/a.mp4?Expires=1"
+        );
+    }
+
+    #[test]
+    fn does_not_rewrite_existing_internal_or_custom_domain() {
+        let internal =
+            Url::parse("https://outin-123.oss-cn-shanghai-internal.aliyuncs.com/a.mp4").unwrap();
+        assert_eq!(rewrite_aliyun_oss_url_to_internal(&internal), internal);
+
+        let custom = Url::parse("https://media.example.com/a.mp4").unwrap();
+        assert_eq!(rewrite_aliyun_oss_url_to_internal(&custom), custom);
     }
 }

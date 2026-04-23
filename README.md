@@ -24,10 +24,12 @@ YingDraft 是一个用 Rust 编写的剪映草稿生成与编辑工具集。
 3. 将阿里云 VOD 时间轴 JSON 转换为剪映草稿
 4. 处理本地视频、音频、图片、字幕等素材
 5. 生成兼容 mac / Windows 剪映的草稿入口文件，并自动将素材本地化到草稿目录
-6. 作为 CLI 被后端或桌面应用调用
-7. CLI 同时支持面向人工终端的文本输出和面向后端调用的 JSON 输出
-8. VOD 远程素材下载时可输出下载进度和素材落盘位置
-9. 仓库内置 GitHub Actions 多平台构建工作流与统一启动脚本，便于快速打包部署
+6. 将 `bundle.json + timeline.json` 项目包导入为当前机器可打开的剪映草稿
+7. 作为 CLI 被后端或桌面应用调用
+8. CLI 同时支持面向人工终端的文本输出和面向后端调用的 JSON 输出
+9. VOD 和 bundle 导入过程都可输出进度事件，便于后端实时读取状态
+10. CLI 支持从 GitHub Releases 自更新，便于用户侧持续升级
+11. 仓库内置 GitHub Actions 多平台构建工作流与统一启动脚本，便于快速打包部署
 
 ## 项目结构
 
@@ -41,8 +43,12 @@ YingDraft 是一个用 Rust 编写的剪映草稿生成与编辑工具集。
   负责把 `Project` 转成剪映草稿 JSON 并写入草稿目录
 - `crates/jy_template`
   负责模板草稿的素材替换、文本替换和草稿复制
+- `crates/jy_bundle`
+  负责项目包导入、zip 解包、素材解析与本机绝对路径落地
 - `crates/jy_cli`
   对外暴露命令行能力
+- `app/`
+  Tauri 2.0 桌面端壳子，面向普通剪辑师做本地导入
 
 ## 典型用途
 
@@ -62,9 +68,23 @@ YingDraft 是一个用 Rust 编写的剪映草稿生成与编辑工具集。
 
 如果你的最终交付对象是普通用户，可以把 YingDraft 作为本地导入器的内核，在用户机器上把素材路径重写为绝对路径，再生成最终草稿。
 
+### 5. 桌面导入器
+
+仓库现在已经起了第一版 `app/` Tauri 2.0 壳子：
+
+- 前端目录：`app/src`
+- Tauri Rust 入口：`app/src-tauri`
+- 共享导入内核：`crates/jy_bundle`
+
+当前桌面端 MVP 已打通：
+
+1. 选择 `.zip` 项目包、项目目录或 `bundle.json`
+2. 自动检测常见剪映草稿箱目录
+3. 调用共享 Rust 导入内核生成最终草稿
+
 ## 草稿兼容性
 
-当前 `jy_draft` 在写草稿时做了两层兼容处理，`generate`、`generate-demo`、`vod-json-to-draft` 都会自动吃到：
+当前 `jy_draft` 在写草稿时做了两层兼容处理，`generate`、`generate-demo`、`import-bundle`、`vod-json-to-draft` 都会自动吃到：
 
 1. 同时写出 `draft_content.json` 和 `draft_info.json`
    这两份时间线文件内容保持一致，兼容不同版本剪映的草稿入口读取方式。
@@ -73,7 +93,98 @@ YingDraft 是一个用 Rust 编写的剪映草稿生成与编辑工具集。
 
 这套兼容逻辑当前已经在本机的 mac 高版本剪映上通过实际生成草稿验证。
 
+## 项目包导入
+
+`import-bundle` 是为“本地导入器 / Companion App”准备的第一版跨平台导入内核。
+
+它解决的核心问题是：
+
+1. 服务端只生成项目包，不提前写死用户机器上的素材绝对路径
+2. CLI 在用户机器上解析 `bundle.json + timeline.json`
+3. 把素材引用解析成当前机器可用的本地绝对路径
+4. 最终调用 `write_draft()` 生成剪映草稿
+
+当前命令支持两种项目包：
+
+1. `timeline_package`
+   - 输入 `timeline.json`
+   - 在本机重新生成草稿
+2. `draft_package`
+   - 输入现成 `draft/`
+   - 在本机重写素材绝对路径
+
+其中 `draft_package` 更适合“后端先用 VOD JSON 生成草稿，再把草稿连同素材一起分发给用户”的场景。
+
+推荐的最小项目包结构：
+
+```text
+project_bundle/
+  bundle.json
+  timeline.json
+  assets/
+    video/
+    audio/
+    image/
+```
+
 ## 快速开始
+
+### 一条命令安装 CLI
+
+macOS / Linux 用户可以直接执行：
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/zz1998022/RustYingDraft/main/scripts/install.sh)"
+```
+
+安装后可使用：
+
+```bash
+jy --help
+```
+
+后续升级可以直接执行：
+
+```bash
+jy update
+```
+
+如果要更新到指定版本：
+
+```bash
+jy update --version v0.1.0
+```
+
+默认安装到：
+
+```text
+~/.local/opt/YingDraft
+```
+
+如果要指定版本或安装目录：
+
+```bash
+YINGDRAFT_VERSION=v0.1.0 YINGDRAFT_INSTALL_DIR="$HOME/.local/opt/YingDraft" \
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/zz1998022/RustYingDraft/main/scripts/install.sh)"
+```
+
+这个安装方式依赖 GitHub Releases 中的发布包资产。发布 Release 有两种方式：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+也可以在 GitHub Actions 里手动运行 `Build Release Bundles`，填写 `release_version`，例如 `v0.1.0`。
+
+Release 会包含这些资产：
+
+- `yingdraft-windows-x64.tar.gz`
+- `yingdraft-linux-x64.tar.gz`
+- `yingdraft-macos-x64.tar.gz`
+- `yingdraft-macos-arm64.tar.gz`
+
+说明：普通 push 到 `main` 只会构建 Actions Artifacts，不会创建 GitHub Release。只有推送 `v*` tag，或手动运行 workflow 并填写 `release_version`，才会发布 Release。
 
 ### 环境要求
 
@@ -140,6 +251,33 @@ cargo run -p jy_cli -- generate-demo --help
 cargo run -p jy_cli -- vod-json-to-draft --help
 ```
 
+如果运行在阿里云同地域服务器上，可以加 `--use-internal-url`，让远程素材下载优先走 OSS 内网 Endpoint，降低公网流量成本。
+
+### 导入项目包并生成草稿
+
+```powershell
+cargo run -p jy_cli -- import-bundle `
+  --source ./project_bundle.zip `
+  --output ./draft_out `
+  --name my_imported_draft
+```
+
+`--source` 可以是项目目录、`.zip` 项目包，或者直接指向 `bundle.json`。
+
+### 启动桌面导入器
+
+```powershell
+cd app
+npm install
+npm run tauri dev
+```
+
+Rust 侧也可以单独先检查：
+
+```powershell
+cargo check -p yingdraft_companion
+```
+
 ### 面向后端的 JSON 输出
 
 所有命令都支持：
@@ -177,7 +315,9 @@ cargo run -p jy_cli -- --output-format json generate --project ./project.json --
 如果你需要快速打包 Linux / macOS / Windows 产物，仓库里已经提供：
 
 - `.github/workflows/build-release-bundles.yml`
-  - 在 GitHub Actions 中生成三平台发布包 artifact
+  - 在 GitHub Actions 中生成 CLI 多平台发布包 artifact，并可在 tag / 手动版本发布时上传到 Release
+- `.github/workflows/build-tauri-app.yml`
+  - 在 GitHub Actions 中生成 Tauri 桌面端多平台安装包 artifact，并可在 tag / 手动版本发布时上传到 Release
 - `scripts/run-jy.ps1`
 - `scripts/run-jy.sh`
   - 统一从发布包目录启动 CLI
@@ -192,6 +332,7 @@ cargo run -p jy_cli -- --output-format json generate --project ./project.json --
 
 - [使用文档.md](./docs/使用文档.md)
 - [部署文档.md](./docs/部署文档.md)
+- [Bundle规范.md](./docs/Bundle规范.md)
 - [Manifest规范.md](./docs/Manifest规范.md)
 - [COMPANION_APP_DESIGN.md](./docs/COMPANION_APP_DESIGN.md)
 - [素材落地工具设计.md](./docs/素材落地工具设计.md)

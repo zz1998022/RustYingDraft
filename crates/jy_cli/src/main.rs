@@ -90,6 +90,15 @@ enum Command {
         #[arg(short, long)]
         output: camino::Utf8PathBuf,
     },
+    /// 将 bundle.json + timeline.json 项目包导入为当前机器可打开的剪映草稿。
+    ImportBundle {
+        #[arg(long)]
+        source: camino::Utf8PathBuf,
+        #[arg(short, long)]
+        output: camino::Utf8PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// 将阿里云 VOD 时间轴 JSON 转换为剪映草稿。
     VodJsonToDraft {
         #[arg(long)]
@@ -100,11 +109,26 @@ enum Command {
         output: camino::Utf8PathBuf,
         #[arg(long)]
         name: Option<String>,
+        /// 下载阿里云 OSS/VOD 素材时优先使用内网 Endpoint。
+        #[arg(long, default_value_t = false)]
+        use_internal_url: bool,
     },
     /// 查看草稿中的轨道、素材和模板可替换资源信息。
     Inspect {
         #[arg(short, long)]
         draft: camino::Utf8PathBuf,
+    },
+    /// 从 GitHub Releases 下载并安装最新 CLI。
+    Update {
+        /// 指定要更新到的版本，例如 v0.1.0；默认使用 latest。
+        #[arg(long)]
+        version: Option<String>,
+        /// 指定发布仓库，默认 zz1998022/RustYingDraft。
+        #[arg(long, default_value = "zz1998022/RustYingDraft")]
+        repo: String,
+        /// 指定安装目录；默认自动从当前可执行文件推断。
+        #[arg(long)]
+        install_dir: Option<camino::Utf8PathBuf>,
     },
     /// 按素材名替换模板中的素材。
     TemplateReplaceMaterialName {
@@ -178,11 +202,12 @@ enum Command {
 
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
-    let wants_json = args.windows(2).any(|pair| {
-        pair[0] == "--output-format" && pair[1].eq_ignore_ascii_case("json")
-    }) || args
-        .iter()
-        .any(|arg| arg.eq_ignore_ascii_case("--output-format=json"));
+    let wants_json = args
+        .windows(2)
+        .any(|pair| pair[0] == "--output-format" && pair[1].eq_ignore_ascii_case("json"))
+        || args
+            .iter()
+            .any(|arg| arg.eq_ignore_ascii_case("--output-format=json"));
 
     output::init(if wants_json {
         output::OutputFormat::Json
@@ -223,7 +248,10 @@ fn main() {
             height,
             fps,
             output,
-        } => ("init", commands::init::run(&name, width, height, fps, &output)),
+        } => (
+            "init",
+            commands::init::run(&name, width, height, fps, &output),
+        ),
         Command::Generate { project, output } => {
             ("generate", commands::generate::run(&project, &output))
         }
@@ -241,11 +269,20 @@ fn main() {
                 &name, &video, &dubbing, &bgm, &subtitle, &watermark, &output,
             ),
         ),
+        Command::ImportBundle {
+            source,
+            output,
+            name,
+        } => (
+            "import-bundle",
+            commands::import_bundle::run(&source, &output, name.as_deref()),
+        ),
         Command::VodJsonToDraft {
             config,
             assets_dir,
             output,
             name,
+            use_internal_url,
         } => (
             "vod-json-to-draft",
             commands::vod_json_to_draft::run(
@@ -253,9 +290,18 @@ fn main() {
                 assets_dir.as_deref(),
                 &output,
                 name.as_deref(),
+                use_internal_url,
             ),
         ),
         Command::Inspect { draft } => ("inspect", commands::inspect::run(&draft)),
+        Command::Update {
+            version,
+            repo,
+            install_dir,
+        } => (
+            "update",
+            commands::update::run(version.as_deref(), &repo, install_dir.as_deref()),
+        ),
         Command::TemplateReplaceMaterialName {
             draft,
             target_name,
