@@ -1,0 +1,36 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - dependabot
+  categories:
+    - title: 新功能
+      labels:
+        - feature
+        - enhancement
+        - feat
+    - title: 修复
+      labels:
+        - bug
+        - fix
+    - title: 桌面端
+      labels:
+        - app
+        - tauri
+        - desktop
+    - title: CLI
+      labels:
+        - cli
+    - title: 文档
+      labels:
+        - documentation
+        - docs
+    - title: 构建与发布
+      labels:
+        - ci
+        - release
+        - build
+    - title: 其他变更
+      labels:
+        - "*"

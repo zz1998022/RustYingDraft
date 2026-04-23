@@ -186,6 +186,8 @@ Release 会包含这些资产：
 
 说明：普通 push 到 `main` 只会构建 Actions Artifacts，不会创建 GitHub Release。只有推送 `v*` tag，或手动运行 workflow 并填写 `release_version`，才会发布 Release。
 
+Release Notes 使用 GitHub 原生 `--generate-notes` 自动生成，分类规则在 `.github/release.yml`。
+
 ### 环境要求
 
 - Rust / Cargo
