@@ -87,16 +87,27 @@ jobs:
         shell: bash
         run: |
           mkdir -p "dist/${{ matrix.artifact_name }}"
-          if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            bundle_root="app/src-tauri/target/release/bundle"
-          else
-            bundle_root="app/src-tauri/target/release/bundle"
-          fi
+          bundle_root=""
+          for candidate in \
+            "target/release/bundle" \
+            "app/src-tauri/target/release/bundle"
+          do
+            if [[ -d "$candidate" ]]; then
+              bundle_root="$candidate"
+              break
+            fi
+          done
 
-          if [[ ! -d "$bundle_root" ]]; then
-            echo "未找到 Tauri bundle 输出目录: $bundle_root" >&2
+          if [[ -z "$bundle_root" ]]; then
+            echo "未找到 Tauri bundle 输出目录。" >&2
+            echo "已检查:" >&2
+            echo "  target/release/bundle" >&2
+            echo "  app/src-tauri/target/release/bundle" >&2
+            echo "当前 target/release 内容:" >&2
+            find target/release -maxdepth 3 -type d -print 2>/dev/null || true
             exit 1
           fi
+          echo "使用 Tauri bundle 输出目录: $bundle_root"
 
           find "$bundle_root" -type f \
             ! -name "*.dSYM" \
