@@ -28,15 +28,23 @@ jobs:
           - runner: windows-latest
             bundle_name: yingdraft-windows-x64
             binary_name: jy_cli.exe
+            binary_path: target/release/jy_cli.exe
+            rust_target: ""
           - runner: ubuntu-latest
             bundle_name: yingdraft-linux-x64
             binary_name: jy_cli
+            binary_path: target/x86_64-unknown-linux-musl/release/jy_cli
+            rust_target: x86_64-unknown-linux-musl
           - runner: macos-15-intel
             bundle_name: yingdraft-macos-x64
             binary_name: jy_cli
+            binary_path: target/release/jy_cli
+            rust_target: ""
           - runner: macos-15
             bundle_name: yingdraft-macos-arm64
             binary_name: jy_cli
+            binary_path: target/release/jy_cli
+            rust_target: ""
 
     steps:
       - name: Checkout
@@ -45,11 +53,27 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Rust target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
+
+      - name: Install Linux musl tools
+        if: matrix.rust_target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Build CLI
-        run: cargo build -p jy_cli --release
+        shell: bash
+        run: |
+          if [[ -n "${{ matrix.rust_target }}" ]]; then
+            cargo build -p jy_cli --release --target "${{ matrix.rust_target }}"
+          else
+            cargo build -p jy_cli --release
+          fi
 
       - name: Prepare bundle
         shell: pwsh
@@ -64,7 +88,7 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path $binDir, $scriptsDir, $docsDir, $workDir, $logsDir | Out-Null
 
-          Copy-Item "target/release/${{ matrix.binary_name }}" (Join-Path $binDir "${{ matrix.binary_name }}") -Force
+          Copy-Item "${{ matrix.binary_path }}" (Join-Path $binDir "${{ matrix.binary_name }}") -Force
           Copy-Item "scripts/run-jy.ps1" (Join-Path $scriptsDir "run-jy.ps1") -Force
           Copy-Item "scripts/run-jy.sh" (Join-Path $scriptsDir "run-jy.sh") -Force
           Copy-Item "scripts/check-env.ps1" (Join-Path $scriptsDir "check-env.ps1") -Force
