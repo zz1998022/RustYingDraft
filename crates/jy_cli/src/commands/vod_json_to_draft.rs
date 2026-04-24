@@ -160,7 +160,7 @@ struct VodFontFace {
 ///
 /// `position_clip` 会把 VOD 里的浮点秒值统一映射为微秒，
 /// 并处理“未显式给出 TimelineIn 时沿用轨道游标继续向后排布”的逻辑。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct PositionedClip {
     start: u64,
     end: u64,
@@ -236,6 +236,7 @@ pub fn run(
         .max()
         .unwrap_or(0);
 
+    let mut video_lanes = HashMap::<usize, Vec<Vec<PositionedClip>>>::new();
     let mut timed_video_entries = Vec::new();
     let mut overlay_entries = Vec::new();
     for (track_idx, track) in project.video_tracks.iter().enumerate() {
@@ -261,10 +262,13 @@ pub fn run(
                 &mut cursor,
             )?;
             duration = duration.max(positioned.end);
-            timed_video_entries.push((track_idx, clip.clone(), material, positioned));
+            let lane_idx =
+                assign_timeline_lane(video_lanes.entry(track_idx).or_default(), positioned);
+            timed_video_entries.push((track_idx, lane_idx, clip.clone(), material, positioned));
         }
     }
 
+    let mut audio_lanes = HashMap::<usize, Vec<Vec<PositionedClip>>>::new();
     let mut audio_entries = Vec::new();
     for (track_idx, track) in project.audio_tracks.iter().enumerate() {
         let mut cursor = 0;
@@ -277,7 +281,35 @@ pub fn run(
                 &mut cursor,
             )?;
             duration = duration.max(positioned.end);
-            audio_entries.push((track_idx, clip.clone(), material, positioned));
+            let lane_idx =
+                assign_timeline_lane(audio_lanes.entry(track_idx).or_default(), positioned);
+            audio_entries.push((track_idx, lane_idx, clip.clone(), material, positioned));
+        }
+    }
+
+    let mut overlay_entries_placed = Vec::new();
+    for (track_idx, clip, material) in overlay_entries {
+        let overlay_duration = duration.max(material.duration.min(duration.max(1)));
+        let positioned = PositionedClip {
+            start: 0,
+            end: overlay_duration,
+        };
+        let lane_idx = assign_timeline_lane(video_lanes.entry(track_idx).or_default(), positioned);
+        overlay_entries_placed.push((track_idx, lane_idx, clip, material, positioned));
+    }
+
+    let mut subtitle_lanes = HashMap::<usize, Vec<Vec<PositionedClip>>>::new();
+    let mut subtitle_entries = Vec::new();
+    for (track_idx, track) in project.subtitle_tracks.iter().enumerate() {
+        for cue in &track.clips {
+            let positioned = PositionedClip {
+                start: seconds_to_us(cue.timeline_in),
+                end: seconds_to_us(cue.timeline_out),
+            };
+            duration = duration.max(positioned.end);
+            let lane_idx =
+                assign_timeline_lane(subtitle_lanes.entry(track_idx).or_default(), positioned);
+            subtitle_entries.push((track_idx, lane_idx, cue.clone(), positioned));
         }
     }
 
@@ -285,30 +317,47 @@ pub fn run(
     let mut builder = ProjectBuilder::new(&project_name, canvas).maintrack_adsorb(true);
 
     for (idx, _) in project.video_tracks.iter().enumerate() {
-        builder = builder.add_track(TrackKind::Video, &format!("video_{idx}"), idx as i32)?;
+        let lane_count = lane_count_for_track(&video_lanes, idx);
+        for lane_idx in 0..lane_count {
+            builder = builder.add_track(
+                TrackKind::Video,
+                &vod_track_name("video", idx, lane_idx),
+                render_index_offset(idx, lane_idx, project.video_tracks.len(), 0),
+            )?;
+        }
     }
     for (idx, _) in project.audio_tracks.iter().enumerate() {
-        builder = builder.add_track(TrackKind::Audio, &format!("audio_{idx}"), idx as i32)?;
+        let lane_count = lane_count_for_track(&audio_lanes, idx);
+        for lane_idx in 0..lane_count {
+            builder = builder.add_track(
+                TrackKind::Audio,
+                &vod_track_name("audio", idx, lane_idx),
+                render_index_offset(idx, lane_idx, project.audio_tracks.len(), 0),
+            )?;
+        }
     }
     for (idx, _) in project.subtitle_tracks.iter().enumerate() {
-        builder = builder.add_track(
-            TrackKind::Text,
-            &format!("subtitle_{idx}"),
-            999 + idx as i32,
-        )?;
+        let lane_count = lane_count_for_track(&subtitle_lanes, idx);
+        for lane_idx in 0..lane_count {
+            builder = builder.add_track(
+                TrackKind::Text,
+                &vod_track_name("subtitle", idx, lane_idx),
+                render_index_offset(idx, lane_idx, project.subtitle_tracks.len(), 999),
+            )?;
+        }
     }
 
-    for (_, _, material, _) in &timed_video_entries {
+    for (_, _, _, material, _) in &timed_video_entries {
         builder = builder.add_video_material(material.clone());
     }
-    for (_, _, material) in &overlay_entries {
+    for (_, _, _, material, _) in &overlay_entries_placed {
         builder = builder.add_video_material(material.clone());
     }
-    for (_, _, material, _) in &audio_entries {
+    for (_, _, _, material, _) in &audio_entries {
         builder = builder.add_audio_material(material.clone());
     }
 
-    for (track_idx, clip, material, positioned) in timed_video_entries {
+    for (track_idx, lane_idx, clip, material, positioned) in timed_video_entries {
         let target = TimeRange::new(positioned.start, positioned.end - positioned.start);
         let transform = build_visual_transform(&clip, &material, &project, false);
         let built_clip = match material.kind {
@@ -322,12 +371,13 @@ pub fn run(
                 transform,
             )?,
         };
-        builder = builder.add_clip_to_track(&format!("video_{track_idx}"), built_clip)?;
+        builder =
+            builder.add_clip_to_track(&vod_track_name("video", track_idx, lane_idx), built_clip)?;
     }
 
     // 全局覆盖层默认铺满整段成片时长。
-    for (track_idx, clip, material) in overlay_entries {
-        let target = TimeRange::new(0, duration.max(material.duration.min(duration.max(1))));
+    for (track_idx, lane_idx, clip, material, positioned) in overlay_entries_placed {
+        let target = TimeRange::new(positioned.start, positioned.end - positioned.start);
         let transform = build_visual_transform(&clip, &material, &project, true);
         let built_clip = match material.kind {
             MaterialKind::Photo => make_image_clip(&material, target, transform),
@@ -340,10 +390,11 @@ pub fn run(
                 transform,
             )?,
         };
-        builder = builder.add_clip_to_track(&format!("video_{track_idx}"), built_clip)?;
+        builder =
+            builder.add_clip_to_track(&vod_track_name("video", track_idx, lane_idx), built_clip)?;
     }
 
-    for (track_idx, _, material, positioned) in audio_entries {
+    for (track_idx, lane_idx, _, material, positioned) in audio_entries {
         let target = TimeRange::new(positioned.start, positioned.end - positioned.start);
         let built_clip = make_audio_clip(
             &material,
@@ -352,45 +403,42 @@ pub fn run(
             None,
             1.0,
         )?;
-        builder = builder.add_clip_to_track(&format!("audio_{track_idx}"), built_clip)?;
+        builder =
+            builder.add_clip_to_track(&vod_track_name("audio", track_idx, lane_idx), built_clip)?;
     }
 
     // 字幕转换目前走“基础样式 + 基础位置”的策略，优先保证可见和位置大致一致。
-    for (track_idx, track) in project.subtitle_tracks.iter().enumerate() {
-        for cue in &track.clips {
-            let style = build_subtitle_style(cue);
-            let transform = Transform {
-                x: cue.x.unwrap_or(0.5),
-                y: cue.y.unwrap_or(0.78),
-                ..Default::default()
-            };
-            let mut text_clip = make_text_clip(
-                &cue.content,
-                TimeRange::new(
-                    seconds_to_us(cue.timeline_in),
-                    seconds_to_us(cue.timeline_out - cue.timeline_in),
-                ),
-                Some(style),
-                Some(transform),
-            );
-            if let Clip::Text(ref mut clip) = text_clip {
-                if cue.outline.unwrap_or(0.0) > 0.0 {
-                    clip.border = Some(TextBorder {
-                        alpha: 1.0,
-                        color: parse_hex_rgb(cue.outline_colour.as_deref().unwrap_or("#000000")),
-                        width: 0.08,
-                    });
-                }
-                clip.shadow = Some(TextShadow {
-                    alpha: 0.35,
-                    color: (0.0, 0.0, 0.0),
-                    diffuse: 18.0,
-                    distance: 5.0,
-                    angle: -45.0,
+    for (track_idx, lane_idx, cue, positioned) in subtitle_entries {
+        let style = build_subtitle_style(&cue);
+        let transform = Transform {
+            x: cue.x.unwrap_or(0.5),
+            y: cue.y.unwrap_or(0.78),
+            ..Default::default()
+        };
+        let mut text_clip = make_text_clip(
+            &cue.content,
+            TimeRange::new(positioned.start, positioned.end - positioned.start),
+            Some(style),
+            Some(transform),
+        );
+        if let Clip::Text(ref mut clip) = text_clip {
+            if cue.outline.unwrap_or(0.0) > 0.0 {
+                clip.border = Some(TextBorder {
+                    alpha: 1.0,
+                    color: parse_hex_rgb(cue.outline_colour.as_deref().unwrap_or("#000000")),
+                    width: 0.08,
                 });
             }
-            builder = builder.add_clip_to_track(&format!("subtitle_{track_idx}"), text_clip)?;
+            clip.shadow = Some(TextShadow {
+                alpha: 0.35,
+                color: (0.0, 0.0, 0.0),
+                diffuse: 18.0,
+                distance: 5.0,
+                angle: -45.0,
+            });
         }
+        builder = builder
+            .add_clip_to_track(&vod_track_name("subtitle", track_idx, lane_idx), text_clip)?;
     }
 
     let draft = builder.build();
@@ -558,6 +606,57 @@ fn position_clip(
     }
     *cursor = end;
     Ok(PositionedClip { start, end })
+}
+
+/// 把同一条 VOD 轨上的重叠片段自动拆到额外 lane。
+///
+/// 阿里云 VOD 时间轴允许某些片段在同一轨道中出现交叠，剪映草稿则要求同一轨
+/// 内片段不能重叠。这里保持原始时间不裁剪，只在需要时创建同类型额外轨道承载。
+fn assign_timeline_lane(lanes: &mut Vec<Vec<PositionedClip>>, clip: PositionedClip) -> usize {
+    for (lane_idx, lane) in lanes.iter_mut().enumerate() {
+        if lane
+            .iter()
+            .all(|existing| !positioned_clips_overlap(*existing, clip))
+        {
+            lane.push(clip);
+            return lane_idx;
+        }
+    }
+
+    lanes.push(vec![clip]);
+    lanes.len() - 1
+}
+
+fn positioned_clips_overlap(left: PositionedClip, right: PositionedClip) -> bool {
+    !(left.end <= right.start || right.end <= left.start)
+}
+
+fn lane_count_for_track(
+    lanes_by_track: &HashMap<usize, Vec<Vec<PositionedClip>>>,
+    track_idx: usize,
+) -> usize {
+    lanes_by_track
+        .get(&track_idx)
+        .map(Vec::len)
+        .unwrap_or(0)
+        .max(1)
+}
+
+fn vod_track_name(prefix: &str, track_idx: usize, lane_idx: usize) -> String {
+    if lane_idx == 0 {
+        format!("{prefix}_{track_idx}")
+    } else {
+        format!("{prefix}_{track_idx}_overlap_{lane_idx}")
+    }
+}
+
+fn render_index_offset(
+    track_idx: usize,
+    lane_idx: usize,
+    base_track_count: usize,
+    base_offset: i32,
+) -> i32 {
+    base_offset + (track_idx + lane_idx * base_track_count.max(1)) as i32
 }
 
 /// 将 VOD JSON 中的浮点秒值转换为剪映内部使用的微秒。
@@ -944,6 +1043,87 @@ mod tests {
         assert_eq!(positioned.start, 5_000_000);
         assert_eq!(positioned.end, 8_500_000);
         assert_eq!(cursor, 8_500_000);
+    }
+
+    #[test]
+    fn assigns_overlapping_ranges_to_extra_lanes() {
+        let mut lanes = Vec::new();
+        assert_eq!(
+            assign_timeline_lane(
+                &mut lanes,
+                PositionedClip {
+                    start: 0,
+                    end: 5_000_000,
+                },
+            ),
+            0
+        );
+        assert_eq!(
+            assign_timeline_lane(
+                &mut lanes,
+                PositionedClip {
+                    start: 4_000_000,
+                    end: 6_000_000,
+                },
+            ),
+            1
+        );
+        assert_eq!(
+            assign_timeline_lane(
+                &mut lanes,
+                PositionedClip {
+                    start: 6_000_000,
+                    end: 8_000_000,
+                },
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn vod_subtitle_overlap_generates_extra_text_track() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Utf8PathBuf::from_path_buf(temp.path().join("vod.json")).unwrap();
+        let output = Utf8PathBuf::from_path_buf(temp.path().join("draft")).unwrap();
+
+        std::fs::write(
+            &config,
+            serde_json::to_string_pretty(&json!({
+                "OutputMediaConfig": { "Width": 1080, "Height": 1920 },
+                "SubtitleTracks": [
+                    {
+                        "SubtitleTrackClips": [
+                            {
+                                "Content": "第一条字幕",
+                                "TimelineIn": 213.112,
+                                "TimelineOut": 218.186
+                            },
+                            {
+                                "Content": "重叠字幕",
+                                "TimelineIn": 217.0,
+                                "TimelineOut": 219.0
+                            }
+                        ]
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        run(&config, None, &output, Some("overlap"), false).unwrap();
+
+        let draft: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(output.join("draft_content.json")).unwrap(),
+        )
+        .unwrap();
+        let text_tracks = draft["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|track| track["type"].as_str() == Some("text"))
+            .count();
+        assert_eq!(text_tracks, 2);
     }
 
     #[test]
