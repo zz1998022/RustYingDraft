@@ -11,7 +11,6 @@ use jy_schema::{
     parse_time_str, Canvas, Clip, TextBackground, TextBorder, TextShadow, TextStyle, TimeRange,
     TrackKind, Transform, SEC,
 };
-use jy_template::{ReplacementMaterial, TemplateDraft};
 use jy_timeline::builder::ProjectBuilder;
 use jy_timeline::clip::{make_audio_clip, make_image_clip, make_text_clip, make_video_clip};
 use serde::{Deserialize, Serialize};
@@ -124,7 +123,8 @@ struct DraftAssetBinding {
     kind: AssetKind,
     match_value: String,
     relative_path: String,
-    name: Option<String>,
+    #[serde(rename = "name")]
+    _name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
@@ -414,26 +414,20 @@ where
     ensure_output_dir_ready(&options.output)?;
     copy_dir_all(&source_draft_dir, &options.output)?;
 
-    let mut draft = TemplateDraft::load_from_draft_dir(&options.output)
-        .with_context(|| format!("failed to load draft package from {}", options.output))?;
     let cache_root = utf8_path_buf(prepared.temp_dir.path().to_path_buf())?;
 
-    for asset in &bundle.assets {
+    let mut replacements = Vec::new();
+    for (index, asset) in bundle.assets.iter().enumerate() {
         let replacement = resolve_draft_binding(
             asset,
             &prepared.bundle_root,
             bundle.assets_dir.as_deref(),
             &cache_root,
+            &options.output,
+            index,
             progress,
         )?;
-        draft
-            .replace_material_by_name(&asset.match_value, &replacement, false)
-            .with_context(|| {
-                format!(
-                    "failed to replace draft material '{}' in draft_package",
-                    asset.match_value
-                )
-            })?;
+        replacements.push(replacement);
     }
 
     let final_name = options
@@ -442,9 +436,7 @@ where
         .or_else(|| bundle.project_name.clone())
         .unwrap_or_else(|| "imported_bundle".to_string());
 
-    draft.save_to_draft_dir(&options.output)?;
-    let content_str = serde_json::to_string_pretty(draft.content())?;
-    std::fs::write(options.output.join("draft_info.json"), content_str)?;
+    rewrite_draft_package_snapshots(&options.output, &replacements)?;
     rewrite_meta_info(&options.output, &final_name)?;
 
     let draft_json: Value = serde_json::from_str(&std::fs::read_to_string(
@@ -727,8 +719,10 @@ fn resolve_draft_binding<F>(
     bundle_root: &Utf8Path,
     assets_dir: Option<&str>,
     cache_root: &Utf8Path,
+    output_draft_dir: &Utf8Path,
+    material_index: usize,
     progress: &mut F,
-) -> Result<ReplacementMaterial>
+) -> Result<DraftMaterialReplacement>
 where
     F: FnMut(ImportBundleProgress),
 {
@@ -746,16 +740,143 @@ where
         asset.kind,
         progress,
     )?;
+    let localized_path =
+        localize_draft_package_asset(&resolved_path, output_draft_dir, asset.kind, material_index)?;
 
-    match asset.kind {
-        AssetKind::Video | AssetKind::Image => Ok(ReplacementMaterial::Video(
-            create_video_material(&resolved_path, asset.name.as_deref())?,
-        )),
-        AssetKind::Audio => Ok(ReplacementMaterial::Audio(create_audio_material(
-            &resolved_path,
-            asset.name.as_deref(),
-        )?)),
+    Ok(DraftMaterialReplacement {
+        kind: asset.kind,
+        name: asset.match_value.clone(),
+        path: normalize_path_for_draft(&localized_path),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct DraftMaterialReplacement {
+    kind: AssetKind,
+    name: String,
+    path: String,
+}
+
+fn localize_draft_package_asset(
+    source: &Utf8Path,
+    output_draft_dir: &Utf8Path,
+    kind: AssetKind,
+    index: usize,
+) -> Result<Utf8PathBuf> {
+    if !source.exists() || !source.is_file() || source.starts_with(output_draft_dir) {
+        return Ok(source.to_path_buf());
     }
+
+    let (category, prefix) = match kind {
+        AssetKind::Video | AssetKind::Image => ("video", "video"),
+        AssetKind::Audio => ("audio", "audio"),
+    };
+    let file_name = source.file_name().unwrap_or("asset");
+    let destination = output_draft_dir
+        .join("_assets")
+        .join(category)
+        .join(format!("{prefix}_{index:04}_{file_name}"));
+
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(source, &destination).with_context(|| {
+        format!("failed to copy draft package asset: {source} -> {destination}")
+    })?;
+
+    Ok(destination)
+}
+
+fn rewrite_draft_package_snapshots(
+    draft_dir: &Utf8Path,
+    replacements: &[DraftMaterialReplacement],
+) -> Result<()> {
+    let mut snapshot_files = Vec::new();
+    collect_draft_snapshot_files(draft_dir, &mut snapshot_files)?;
+
+    for snapshot_file in snapshot_files {
+        rewrite_draft_snapshot(&snapshot_file, replacements)
+            .with_context(|| format!("failed to rewrite draft snapshot: {snapshot_file}"))?;
+    }
+
+    Ok(())
+}
+
+fn collect_draft_snapshot_files(
+    current_dir: &Utf8Path,
+    snapshot_files: &mut Vec<Utf8PathBuf>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(current_dir)? {
+        let entry = entry?;
+        let path = utf8_path_buf(entry.path())?;
+        if entry.file_type()?.is_dir() {
+            collect_draft_snapshot_files(&path, snapshot_files)?;
+            continue;
+        }
+
+        if is_draft_snapshot_file(&path) {
+            snapshot_files.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn is_draft_snapshot_file(path: &Utf8Path) -> bool {
+    matches!(
+        path.file_name(),
+        Some("draft_content.json" | "draft_info.json" | "draft_info.json.bak" | "template-2.tmp")
+    )
+}
+
+fn rewrite_draft_snapshot(
+    snapshot_file: &Utf8Path,
+    replacements: &[DraftMaterialReplacement],
+) -> Result<()> {
+    let content = std::fs::read_to_string(snapshot_file)?;
+    let mut draft: Value = match serde_json::from_str(&content) {
+        Ok(draft) => draft,
+        Err(_) => return Ok(()),
+    };
+
+    let mut changed = false;
+    for replacement in replacements {
+        changed |= rewrite_material_path_by_name(&mut draft, replacement);
+    }
+
+    if changed {
+        std::fs::write(snapshot_file, serde_json::to_string_pretty(&draft)?)?;
+    }
+
+    Ok(())
+}
+
+fn rewrite_material_path_by_name(
+    draft: &mut Value,
+    replacement: &DraftMaterialReplacement,
+) -> bool {
+    let Some(materials) = draft.get_mut("materials").and_then(Value::as_object_mut) else {
+        return false;
+    };
+
+    let (list_key, name_key) = match replacement.kind {
+        AssetKind::Video | AssetKind::Image => ("videos", "material_name"),
+        AssetKind::Audio => ("audios", "name"),
+    };
+
+    let Some(items) = materials.get_mut(list_key).and_then(Value::as_array_mut) else {
+        return false;
+    };
+
+    let mut changed = false;
+    for item in items {
+        if item.get(name_key).and_then(Value::as_str) == Some(replacement.name.as_str()) {
+            item["path"] = json!(replacement.path);
+            changed = true;
+        }
+    }
+
+    changed
 }
 
 fn resolve_asset_source<F>(
@@ -1266,6 +1387,13 @@ mod tests {
             .build();
         write_draft(&project, &source_draft_dir)?;
 
+        let source_content = fs::read_to_string(source_draft_dir.join("draft_content.json"))?;
+        fs::write(source_draft_dir.join("template-2.tmp"), &source_content)?;
+        let timeline_dir = source_draft_dir.join("Timelines").join("{TIMELINE-1}");
+        fs::create_dir_all(&timeline_dir)?;
+        fs::write(timeline_dir.join("draft_info.json"), &source_content)?;
+        fs::write(timeline_dir.join("template-2.tmp"), &source_content)?;
+
         fs::write(
             bundle_dir.join("bundle.json"),
             serde_json::to_string_pretty(&json!({
@@ -1299,10 +1427,20 @@ mod tests {
         let replaced_path = content["materials"]["videos"][0]["path"]
             .as_str()
             .unwrap_or_default();
-        assert!(replaced_path.ends_with("/assets/replacement.png"));
+        assert!(replaced_path.contains("/_assets/video/video_0000_replacement.png"));
+        assert!(!replaced_path.contains("/bundle/assets/replacement.png"));
 
         let info = fs::read_to_string(output_dir.join("draft_info.json"))?;
         assert!(info.contains("replacement.png"));
+        assert!(info.contains("/_assets/video/"));
+        let template = fs::read_to_string(output_dir.join("template-2.tmp"))?;
+        assert!(template.contains("/_assets/video/video_0000_replacement.png"));
+        let timeline_info =
+            fs::read_to_string(output_dir.join("Timelines/{TIMELINE-1}/draft_info.json"))?;
+        assert!(timeline_info.contains("/_assets/video/video_0000_replacement.png"));
+        let timeline_template =
+            fs::read_to_string(output_dir.join("Timelines/{TIMELINE-1}/template-2.tmp"))?;
+        assert!(timeline_template.contains("/_assets/video/video_0000_replacement.png"));
         let meta = fs::read_to_string(output_dir.join("draft_meta_info.json"))?;
         assert!(meta.contains("Imported Draft Package"));
 
