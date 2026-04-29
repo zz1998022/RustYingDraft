@@ -77,8 +77,6 @@ struct VodSubtitleTrack {
 }
 
 /// 视频轨上的视觉片段定义。
-///
-/// 这里既承载普通视频片段，也承载 `GlobalImage` 这类全局覆盖层。
 #[derive(Debug, Deserialize, Clone)]
 struct VodVisualClip {
     #[serde(rename = "Type")]
@@ -91,14 +89,6 @@ struct VodVisualClip {
     timeline_out: Option<f64>,
     #[serde(rename = "AdaptMode")]
     adapt_mode: Option<String>,
-    #[serde(rename = "X")]
-    x: Option<f64>,
-    #[serde(rename = "Y")]
-    y: Option<f64>,
-    #[serde(rename = "Width")]
-    width: Option<f64>,
-    #[serde(rename = "Height")]
-    height: Option<f64>,
 }
 
 /// 音频轨上的片段定义。
@@ -238,23 +228,20 @@ pub fn run(
 
     let mut video_lanes = HashMap::<usize, Vec<Vec<PositionedClip>>>::new();
     let mut timed_video_entries = Vec::new();
-    let mut overlay_entries = Vec::new();
     for (track_idx, track) in project.video_tracks.iter().enumerate() {
         let mut cursor = 0;
         for clip in &track.clips {
-            let material = fetcher.resolve_video_material(&clip.media_url)?;
-            // `GlobalImage` 这种 clip 不走普通时间轴排布，而是转为覆盖层。
-            let is_overlay = clip
+            // 水印/全局图片交给用户在剪映里处理，CLI 不再转换坐标或生成覆盖层。
+            let is_global_image = clip
                 .clip_type
                 .as_deref()
                 .map(|kind| kind.eq_ignore_ascii_case("GlobalImage"))
                 .unwrap_or(false);
-
-            if is_overlay {
-                overlay_entries.push((track_idx, clip.clone(), material));
+            if is_global_image {
                 continue;
             }
 
+            let material = fetcher.resolve_video_material(&clip.media_url)?;
             let positioned = position_clip(
                 &clip.timeline_in,
                 &clip.timeline_out,
@@ -285,17 +272,6 @@ pub fn run(
                 assign_timeline_lane(audio_lanes.entry(track_idx).or_default(), positioned);
             audio_entries.push((track_idx, lane_idx, clip.clone(), material, positioned));
         }
-    }
-
-    let mut overlay_entries_placed = Vec::new();
-    for (track_idx, clip, material) in overlay_entries {
-        let overlay_duration = duration.max(material.duration.min(duration.max(1)));
-        let positioned = PositionedClip {
-            start: 0,
-            end: overlay_duration,
-        };
-        let lane_idx = assign_timeline_lane(video_lanes.entry(track_idx).or_default(), positioned);
-        overlay_entries_placed.push((track_idx, lane_idx, clip, material, positioned));
     }
 
     let mut subtitle_lanes = HashMap::<usize, Vec<Vec<PositionedClip>>>::new();
@@ -350,35 +326,13 @@ pub fn run(
     for (_, _, _, material, _) in &timed_video_entries {
         builder = builder.add_video_material(material.clone());
     }
-    for (_, _, _, material, _) in &overlay_entries_placed {
-        builder = builder.add_video_material(material.clone());
-    }
     for (_, _, _, material, _) in &audio_entries {
         builder = builder.add_audio_material(material.clone());
     }
 
     for (track_idx, lane_idx, clip, material, positioned) in timed_video_entries {
         let target = TimeRange::new(positioned.start, positioned.end - positioned.start);
-        let transform = build_visual_transform(&clip, &material, &project, false);
-        let built_clip = match material.kind {
-            MaterialKind::Photo => make_image_clip(&material, target, transform),
-            _ => make_video_clip(
-                &material,
-                target,
-                Some(TimeRange::new(0, target.duration.min(material.duration))),
-                None,
-                1.0,
-                transform,
-            )?,
-        };
-        builder =
-            builder.add_clip_to_track(&vod_track_name("video", track_idx, lane_idx), built_clip)?;
-    }
-
-    // 全局覆盖层默认铺满整段成片时长。
-    for (track_idx, lane_idx, clip, material, positioned) in overlay_entries_placed {
-        let target = TimeRange::new(positioned.start, positioned.end - positioned.start);
-        let transform = build_visual_transform(&clip, &material, &project, true);
+        let transform = build_visual_transform(&clip);
         let built_clip = match material.kind {
             MaterialKind::Photo => make_image_clip(&material, target, transform),
             _ => make_video_clip(
@@ -495,6 +449,14 @@ fn collect_remote_sources(project: &VodProject) -> Vec<String> {
 
     for track in &project.video_tracks {
         for clip in &track.clips {
+            if clip
+                .clip_type
+                .as_deref()
+                .map(|kind| kind.eq_ignore_ascii_case("GlobalImage"))
+                .unwrap_or(false)
+            {
+                continue;
+            }
             push_source(&clip.media_url);
         }
     }
@@ -550,37 +512,8 @@ fn build_subtitle_style(cue: &VodSubtitleClip) -> TextStyle {
 
 /// 构建视觉变换信息。
 ///
-/// - 对普通视频片段，当前先保守处理，不额外变换
-/// - 对 `GlobalImage` 覆盖层，则根据像素坐标和目标尺寸近似换算到剪映坐标
-fn build_visual_transform(
-    clip: &VodVisualClip,
-    material: &VideoMaterialRef,
-    project: &VodProject,
-    use_pixel_geometry: bool,
-) -> Option<Transform> {
-    if use_pixel_geometry {
-        let canvas = resolve_canvas(project);
-        let target_width = clip.width.unwrap_or(material.width as f64);
-        let target_height = clip.height.unwrap_or(material.height as f64);
-        let x = clip.x.unwrap_or(0.0);
-        let y = clip.y.unwrap_or(0.0);
-        return Some(Transform {
-            x: ((x + target_width / 2.0) / canvas.width as f64).clamp(0.0, 1.5),
-            y: ((y + target_height / 2.0) / canvas.height as f64).clamp(-0.5, 1.5),
-            scale_x: if material.width > 0 {
-                target_width / material.width as f64
-            } else {
-                1.0
-            },
-            scale_y: if material.height > 0 {
-                target_height / material.height as f64
-            } else {
-                1.0
-            },
-            ..Default::default()
-        });
-    }
-
+/// 对普通视频片段，当前先保守处理，不额外变换。
+fn build_visual_transform(clip: &VodVisualClip) -> Option<Transform> {
     match clip.adapt_mode.as_deref() {
         // 第一版里 `Contain` 暂时不做裁剪和额外填充，保持默认行为。
         Some("Contain") => None,
@@ -1146,10 +1079,6 @@ mod tests {
                         timeline_in: None,
                         timeline_out: None,
                         adapt_mode: None,
-                        x: None,
-                        y: None,
-                        width: None,
-                        height: None,
                     },
                     VodVisualClip {
                         clip_type: None,
@@ -1157,10 +1086,13 @@ mod tests {
                         timeline_in: None,
                         timeline_out: None,
                         adapt_mode: None,
-                        x: None,
-                        y: None,
-                        width: None,
-                        height: None,
+                    },
+                    VodVisualClip {
+                        clip_type: Some("GlobalImage".to_string()),
+                        media_url: "https://example.com/watermark.png".to_string(),
+                        timeline_in: None,
+                        timeline_out: None,
+                        adapt_mode: None,
                     },
                 ],
             }],
