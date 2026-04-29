@@ -8,4 +8,5 @@ pub mod template_replace_material_name;
 pub mod template_replace_material_seg;
 pub mod template_replace_text;
 pub mod update;
+pub mod version;
 pub mod vod_json_to_draft;

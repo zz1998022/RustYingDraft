@@ -24,7 +24,11 @@ enum EditableTrackKindArg {
 }
 
 #[derive(Parser)]
-#[command(name = "jy", about = "剪映草稿生成与模板处理 CLI")]
+#[command(
+    name = "jy",
+    about = "剪映草稿生成与模板处理 CLI",
+    version = commands::version::VERSION
+)]
 struct Cli {
     /// 控制 CLI 的输出格式。
     ///
@@ -53,6 +57,8 @@ impl From<OutputFormatArg> for output::OutputFormat {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 查看当前 CLI 版本号。
+    Version,
     /// 初始化一个空的 project manifest。
     Init {
         #[arg(short, long)]
@@ -242,6 +248,7 @@ fn main() {
 
     // 统一在这里分发所有命令，避免业务逻辑散落在 main 中。
     let (command_name, result) = match cli.command {
+        Command::Version => ("version", commands::version::run()),
         Command::Init {
             name,
             width,
