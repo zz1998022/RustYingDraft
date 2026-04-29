@@ -292,7 +292,7 @@ pub fn run(
     }
 
     // 先把轨道骨架全部建好，后面统一往对应轨道里塞 clip。
-    let mut builder = ProjectBuilder::new(&project_name, canvas).maintrack_adsorb(true);
+    let mut builder = ProjectBuilder::new(&project_name, canvas.clone()).maintrack_adsorb(true);
 
     for (idx, _) in project.video_tracks.iter().enumerate() {
         let lane_count = lane_count_for_track(&video_lanes, idx);
@@ -366,7 +366,7 @@ pub fn run(
     // 字幕转换目前走“基础样式 + 基础位置”的策略，优先保证可见和位置大致一致。
     for (track_idx, lane_idx, cue, positioned) in subtitle_entries {
         let style = build_subtitle_style(&cue);
-        let transform = build_subtitle_transform(&cue);
+        let transform = build_subtitle_transform(&cue, &canvas);
         let mut text_clip = make_text_clip(
             &cue.content,
             TimeRange::new(positioned.start, positioned.end - positioned.start),
@@ -378,7 +378,7 @@ pub fn run(
                 clip.border = Some(TextBorder {
                     alpha: 1.0,
                     color: parse_hex_rgb(cue.outline_colour.as_deref().unwrap_or("#000000")),
-                    width: cue.outline.unwrap_or(0.0),
+                    width: vod_outline_to_jy_border_width(cue.outline.unwrap_or(0.0)),
                 });
             }
             if cue.shadow.unwrap_or(0.0) > 0.0 {
@@ -504,22 +504,42 @@ fn build_subtitle_style(cue: &VodSubtitleClip) -> TextStyle {
             Some("Right") => TextAlign::Right,
             _ => TextAlign::Left,
         },
-        auto_wrapping: cue.adapt_mode.as_deref() == Some("AutoWrap"),
+        auto_wrapping: is_auto_wrapping_adapt_mode(cue.adapt_mode.as_deref()),
         max_line_width: cue.text_width.unwrap_or(0.82),
         ..Default::default()
     }
 }
 
-/// VOD 字幕的 X/Y 已经由后端按剪映 transform 坐标写死。
+fn is_auto_wrapping_adapt_mode(adapt_mode: Option<&str>) -> bool {
+    matches!(adapt_mode, Some("AutoWrap") | Some("AutoWrapAtSpaces"))
+}
+
+/// 参考 pyJianYingDraft，剪映界面里的描边宽度需要转成草稿内部宽度。
+fn vod_outline_to_jy_border_width(width: f64) -> f64 {
+    width / 100.0 * 0.2
+}
+
+/// VOD 字幕的 X/Y 由后端按剪映界面位移值写死。
 ///
-/// 通用 `Transform` 会在写草稿时执行 `(value - 0.5) * 2` 的归一化换算，
-/// 这里反向预处理一次，确保最终草稿里的 `clip.transform.x/y` 保持 VOD 原值。
-fn build_subtitle_transform(cue: &VodSubtitleClip) -> Transform {
+/// 参考 pyJianYingDraft，草稿里的 `clip.transform.x/y` 不是像素，而是剪映内部
+/// 位移比例；剪映界面会再乘画布宽度展示像素值。因此这里先把后端给的像素位移
+/// 除以画布宽度，再反向适配项目内部的 `Transform`。
+fn build_subtitle_transform(cue: &VodSubtitleClip, canvas: &Canvas) -> Transform {
     Transform {
-        x: jy_transform_to_internal(cue.x.unwrap_or(0.0)),
-        y: jy_transform_to_internal(cue.y.unwrap_or(0.56)),
+        x: jy_transform_to_internal(vod_subtitle_position_to_jy_transform(
+            cue.x.unwrap_or(0.0),
+            canvas,
+        )),
+        y: jy_transform_to_internal(vod_subtitle_position_to_jy_transform(
+            cue.y.unwrap_or(0.0),
+            canvas,
+        )),
         ..Default::default()
     }
+}
+
+fn vod_subtitle_position_to_jy_transform(value: f64, canvas: &Canvas) -> f64 {
+    value / canvas.width.max(1) as f64
 }
 
 fn jy_transform_to_internal(value: f64) -> f64 {
@@ -1051,7 +1071,8 @@ mod tests {
                                 "FontSize": 65.0,
                                 "Outline": 10,
                                 "OutlineColour": "#000000",
-                                "Shadow": 1
+                                "Shadow": 1,
+                                "AdaptMode": "AutoWrapAtSpaces"
                             },
                             {
                                 "Content": "重叠字幕",
@@ -1096,14 +1117,19 @@ mod tests {
             .map(|segment| &segment["clip"]["transform"])
             .unwrap();
         assert_eq!(first_transform["x"].as_f64(), Some(0.0));
-        assert_eq!(first_transform["y"].as_f64(), Some(-899.0));
+        assert_eq!(first_transform["y"].as_f64(), Some(-899.0 / 1080.0));
 
         let first_text_content = draft["materials"]["texts"][0]["content"].as_str().unwrap();
         let first_text_content: serde_json::Value =
             serde_json::from_str(first_text_content).unwrap();
         let first_style = &first_text_content["styles"][0];
         assert_eq!(first_style["size"].as_f64(), Some(65.0));
-        assert_eq!(first_style["strokes"][0]["width"].as_f64(), Some(10.0));
+        let stroke_width = first_style["strokes"][0]["width"].as_f64().unwrap();
+        assert!((stroke_width - 0.02).abs() < f64::EPSILON);
+        assert_eq!(
+            draft["materials"]["texts"][0]["type"].as_str(),
+            Some("subtitle")
+        );
     }
 
     #[test]
