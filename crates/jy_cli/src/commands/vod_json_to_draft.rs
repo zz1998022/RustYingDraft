@@ -129,6 +129,8 @@ struct VodSubtitleClip {
     outline_colour: Option<String>,
     #[serde(rename = "FontColorOpacity")]
     font_color_opacity: Option<f64>,
+    #[serde(rename = "Shadow")]
+    shadow: Option<f64>,
     #[serde(rename = "AdaptMode")]
     adapt_mode: Option<String>,
     #[serde(rename = "FontFace")]
@@ -364,11 +366,7 @@ pub fn run(
     // 字幕转换目前走“基础样式 + 基础位置”的策略，优先保证可见和位置大致一致。
     for (track_idx, lane_idx, cue, positioned) in subtitle_entries {
         let style = build_subtitle_style(&cue);
-        let transform = Transform {
-            x: cue.x.unwrap_or(0.5),
-            y: cue.y.unwrap_or(0.78),
-            ..Default::default()
-        };
+        let transform = build_subtitle_transform(&cue);
         let mut text_clip = make_text_clip(
             &cue.content,
             TimeRange::new(positioned.start, positioned.end - positioned.start),
@@ -380,16 +378,18 @@ pub fn run(
                 clip.border = Some(TextBorder {
                     alpha: 1.0,
                     color: parse_hex_rgb(cue.outline_colour.as_deref().unwrap_or("#000000")),
-                    width: 0.08,
+                    width: cue.outline.unwrap_or(0.0),
                 });
             }
-            clip.shadow = Some(TextShadow {
-                alpha: 0.35,
-                color: (0.0, 0.0, 0.0),
-                diffuse: 18.0,
-                distance: 5.0,
-                angle: -45.0,
-            });
+            if cue.shadow.unwrap_or(0.0) > 0.0 {
+                clip.shadow = Some(TextShadow {
+                    alpha: 0.35,
+                    color: (0.0, 0.0, 0.0),
+                    diffuse: 18.0,
+                    distance: 5.0,
+                    angle: -45.0,
+                });
+            }
         }
         builder = builder
             .add_clip_to_track(&vod_track_name("subtitle", track_idx, lane_idx), text_clip)?;
@@ -485,7 +485,7 @@ fn resolve_canvas(project: &VodProject) -> Canvas {
 /// 这里先做基础字段映射，后续如果要补字体资源映射，可以从这里继续扩展。
 fn build_subtitle_style(cue: &VodSubtitleClip) -> TextStyle {
     TextStyle {
-        size: cue.font_size.unwrap_or(72.0) / 10.0,
+        size: cue.font_size.unwrap_or(72.0),
         bold: cue.font_face.as_ref().and_then(|f| f.bold).unwrap_or(false),
         italic: cue
             .font_face
@@ -508,6 +508,22 @@ fn build_subtitle_style(cue: &VodSubtitleClip) -> TextStyle {
         max_line_width: cue.text_width.unwrap_or(0.82),
         ..Default::default()
     }
+}
+
+/// VOD 字幕的 X/Y 已经由后端按剪映 transform 坐标写死。
+///
+/// 通用 `Transform` 会在写草稿时执行 `(value - 0.5) * 2` 的归一化换算，
+/// 这里反向预处理一次，确保最终草稿里的 `clip.transform.x/y` 保持 VOD 原值。
+fn build_subtitle_transform(cue: &VodSubtitleClip) -> Transform {
+    Transform {
+        x: jy_transform_to_internal(cue.x.unwrap_or(0.0)),
+        y: jy_transform_to_internal(cue.y.unwrap_or(0.56)),
+        ..Default::default()
+    }
+}
+
+fn jy_transform_to_internal(value: f64) -> f64 {
+    value / 2.0 + 0.5
 }
 
 /// 构建视觉变换信息。
@@ -1029,12 +1045,24 @@ mod tests {
                             {
                                 "Content": "第一条字幕",
                                 "TimelineIn": 213.112,
-                                "TimelineOut": 218.186
+                                "TimelineOut": 218.186,
+                                "X": 0.0,
+                                "Y": -899.0,
+                                "FontSize": 65.0,
+                                "Outline": 10,
+                                "OutlineColour": "#000000",
+                                "Shadow": 1
                             },
                             {
                                 "Content": "重叠字幕",
                                 "TimelineIn": 217.0,
-                                "TimelineOut": 219.0
+                                "TimelineOut": 219.0,
+                                "X": 0.0,
+                                "Y": -899.0,
+                                "FontSize": 65.0,
+                                "Outline": 10,
+                                "OutlineColour": "#000000",
+                                "Shadow": 1
                             }
                         ]
                     }
@@ -1057,6 +1085,25 @@ mod tests {
             .filter(|track| track["type"].as_str() == Some("text"))
             .count();
         assert_eq!(text_tracks, 2);
+
+        let first_transform = draft["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|track| track["type"].as_str() == Some("text"))
+            .and_then(|track| track["segments"].as_array())
+            .and_then(|segments| segments.first())
+            .map(|segment| &segment["clip"]["transform"])
+            .unwrap();
+        assert_eq!(first_transform["x"].as_f64(), Some(0.0));
+        assert_eq!(first_transform["y"].as_f64(), Some(-899.0));
+
+        let first_text_content = draft["materials"]["texts"][0]["content"].as_str().unwrap();
+        let first_text_content: serde_json::Value =
+            serde_json::from_str(first_text_content).unwrap();
+        let first_style = &first_text_content["styles"][0];
+        assert_eq!(first_style["size"].as_f64(), Some(65.0));
+        assert_eq!(first_style["strokes"][0]["width"].as_f64(), Some(10.0));
     }
 
     #[test]
