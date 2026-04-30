@@ -998,7 +998,24 @@ fn build_remote_file_name(url: &Url) -> String {
             }
         })
         .collect();
-    sanitized
+    let hash_input = format!("{}{}", url.host_str().unwrap_or_default(), path);
+    let suffix = stable_short_hash(&hash_input);
+
+    if let Some((stem, ext)) = sanitized.rsplit_once('.') {
+        format!("{stem}-{suffix}.{ext}")
+    } else {
+        format!("{sanitized}-{suffix}")
+    }
+}
+
+/// FNV-1a 短 hash，用于避免不同 URL 目录下的同名素材互相覆盖。
+fn stable_short_hash(input: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:08x}", hash as u32)
 }
 
 #[cfg(test)]
@@ -1208,5 +1225,22 @@ mod tests {
 
         let custom = Url::parse("https://media.example.com/a.mp4").unwrap();
         assert_eq!(rewrite_aliyun_oss_url_to_internal(&custom), custom);
+    }
+
+    #[test]
+    fn remote_file_name_keeps_same_basename_urls_distinct() {
+        let muted =
+            Url::parse("https://example.com/video-voice/109.mp4?Expires=1&Signature=aaa").unwrap();
+        let voiced =
+            Url::parse("https://example.com/video/109.mp4?Expires=2&Signature=bbb").unwrap();
+
+        let muted_name = build_remote_file_name(&muted);
+        let voiced_name = build_remote_file_name(&voiced);
+
+        assert_ne!(muted_name, voiced_name);
+        assert!(muted_name.starts_with("109-"));
+        assert!(muted_name.ends_with(".mp4"));
+        assert!(voiced_name.starts_with("109-"));
+        assert!(voiced_name.ends_with(".mp4"));
     }
 }
