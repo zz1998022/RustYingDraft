@@ -39,7 +39,6 @@ const summaryPanel = document.querySelector<HTMLDivElement>("#bundle-summary")!;
 const statusLine = document.querySelector<HTMLParagraphElement>("#status-line")!;
 const resultPanel = document.querySelector<HTMLPreElement>("#result-panel")!;
 const importButton = document.querySelector<HTMLButtonElement>("#run-import")!;
-const inspectButton = document.querySelector<HTMLButtonElement>("#inspect-source")!;
 const openDraftDirButton = document.querySelector<HTMLButtonElement>("#open-draft-dir")!;
 
 let currentInspection: BundleInspection | null = null;
@@ -48,29 +47,6 @@ let latestDraftDir: string | null = null;
 boot().catch((error) => {
   setStatus(`初始化失败：${stringifyError(error)}`);
 });
-
-document
-  .querySelector<HTMLButtonElement>("#detect-source-nearby")!
-  .addEventListener("click", async () => {
-    await fillDetectedSource();
-  });
-
-document
-  .querySelector<HTMLButtonElement>("#pick-source-file")!
-  .addEventListener("click", async () => {
-    const picked = await open({
-      multiple: false,
-      directory: false,
-      filters: [
-        { name: "Project Bundle", extensions: ["zip", "json"] },
-        { name: "All Files", extensions: ["*"] },
-      ],
-    });
-    if (typeof picked === "string") {
-      sourcePathInput.value = picked;
-      await inspectCurrentSource();
-    }
-  });
 
 document
   .querySelector<HTMLButtonElement>("#pick-source-dir")!
@@ -84,28 +60,6 @@ document
       await inspectCurrentSource();
     }
   });
-
-document
-  .querySelector<HTMLButtonElement>("#pick-draft-box")!
-  .addEventListener("click", async () => {
-    const picked = await open({
-      multiple: false,
-      directory: true,
-    });
-    if (typeof picked === "string") {
-      draftBoxInput.value = picked;
-    }
-  });
-
-document
-  .querySelector<HTMLButtonElement>("#detect-draft-box")!
-  .addEventListener("click", async () => {
-    await fillDetectedDraftBox();
-  });
-
-inspectButton.addEventListener("click", async () => {
-  await inspectCurrentSource();
-});
 
 importButton.addEventListener("click", async () => {
   await runImport();
@@ -125,45 +79,31 @@ openDraftDirButton.addEventListener("click", async () => {
 });
 
 async function boot(): Promise<void> {
-  await fillDetectedDraftBox();
-  const detectedSource = await fillDetectedSource();
-  if (!detectedSource) {
-    setStatus("等待选择项目包。");
-  }
+  const hasDraftBox = await fillDetectedDraftBox();
+  setStatus(hasDraftBox ? "请选择下载好的草稿项目目录。" : "没有检测到剪映草稿箱，请先打开剪映后重试。");
 }
 
-async function fillDetectedDraftBox(): Promise<void> {
+async function fillDetectedDraftBox(): Promise<boolean> {
   const detected = await invoke<string | null>("detect_draft_box_dir");
   if (detected) {
     draftBoxInput.value = detected;
-    setStatus("已自动检测到一个常见的剪映草稿箱目录。");
-  } else {
-    setStatus("暂时没有检测到默认草稿箱目录，可以手动选择。");
-  }
-}
-
-async function fillDetectedSource(): Promise<boolean> {
-  const detected = await invoke<string | null>("detect_bundle_source_near_app");
-  if (!detected) {
-    return false;
+    return true;
   }
 
-  sourcePathInput.value = detected;
-  await inspectCurrentSource();
-  return true;
+  draftBoxInput.value = "";
+  return false;
 }
 
 async function inspectCurrentSource(): Promise<void> {
   const source = sourcePathInput.value.trim();
   if (!source) {
-    setStatus("请先选择项目包、项目目录，或者 bundle.json。");
+    setStatus("请先选择项目目录。");
     return;
   }
 
-  inspectButton.disabled = true;
   latestDraftDir = null;
   openDraftDirButton.classList.add("is-hidden");
-  setStatus("正在读取项目包信息...");
+  setStatus("正在读取项目目录...");
 
   try {
     const inspection = await invoke<BundleInspection>("inspect_bundle_source", { source });
@@ -189,8 +129,6 @@ async function inspectCurrentSource(): Promise<void> {
     summaryPanel.textContent = "这个项目暂时读不了，请换一个再试。";
     resultPanel.textContent = stringifyError(error);
     setStatus("检查失败。");
-  } finally {
-    inspectButton.disabled = false;
   }
 }
 
@@ -199,8 +137,13 @@ async function runImport(): Promise<void> {
   const draftBoxDir = draftBoxInput.value.trim();
   const draftName = draftNameInput.value.trim();
 
-  if (!source || !draftBoxDir || !draftName) {
-    setStatus("请把项目来源、草稿箱目录和草稿名都填完整。");
+  if (!source || !draftName) {
+    setStatus("请先选择项目目录，并确认草稿名。");
+    return;
+  }
+
+  if (!draftBoxDir) {
+    setStatus("没有检测到剪映草稿箱，请先打开剪映后重试。");
     return;
   }
 

@@ -3,15 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>YingDraft Companion</title>
+    <title>DramFlow剪映导入插件</title>
     <script type="module" src="/src/main.ts"></script>
   </head>
   <body>
     <div class="shell">
       <aside class="hero">
-        <p class="eyebrow">YingDraft Companion</p>
+        <p class="eyebrow">DramFlow剪映导入插件</p>
         <h1>把下载好的项目，一键变成能在剪映里打开的草稿。</h1>
-        <p class="lede">选项目包，选草稿箱，点一下开始生成。剩下的交给它。</p>
+        <p class="lede">选择下载好的草稿目录，点一下开始生成。剩下的交给它。</p>
         <div class="hero-card">
           <strong>适合剪辑师直接使用</strong>
           <p>支持 Windows 和 macOS，尽量少配置，尽量少理解成本。</p>
@@ -28,36 +28,24 @@
           </div>
 
           <div class="picker-row">
-            <button id="detect-source-nearby" class="button button-secondary">读取同目录项目</button>
-            <button id="pick-source-file" class="button button-primary">选择项目包 / bundle.json</button>
-            <button id="pick-source-dir" class="button button-secondary">选择项目目录</button>
+            <button id="pick-source-dir" class="button button-primary">选择项目目录</button>
           </div>
 
           <label class="field">
             <span>项目位置</span>
-            <input id="source-path" type="text" placeholder="选择项目包、项目目录或 bundle.json" />
+            <input id="source-path" type="text" placeholder="请选择下载好的草稿项目目录" readonly />
           </label>
 
-          <button id="inspect-source" class="button button-ghost">检查项目</button>
-
-          <div id="bundle-summary" class="summary empty">选好后点“检查项目”。</div>
+          <div id="bundle-summary" class="summary empty">请选择项目目录。</div>
         </section>
 
         <section class="card">
           <div class="section-header">
             <p class="section-kicker">Step 2</p>
-            <h2>选保存位置</h2>
+            <h2>确认草稿名</h2>
           </div>
 
-          <div class="picker-row">
-            <button id="detect-draft-box" class="button button-secondary">自动检测</button>
-            <button id="pick-draft-box" class="button button-secondary">手动选择目录</button>
-          </div>
-
-          <label class="field">
-            <span>剪映草稿箱</span>
-            <input id="draft-box-dir" type="text" placeholder="选择剪映草稿箱目录" />
-          </label>
+          <input id="draft-box-dir" type="hidden" />
 
           <label class="field">
             <span>输出草稿名</span>

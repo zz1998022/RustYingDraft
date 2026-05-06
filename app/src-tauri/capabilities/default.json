@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main YingDraft Companion window.",
+  "description": "Default capability for the main DramFlow剪映导入插件 window.",
   "windows": ["main"],
   "permissions": ["core:default", "dialog:default"]
 }

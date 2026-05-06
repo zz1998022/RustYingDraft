@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability for the main YingDraft Companion window.","local":true,"windows":["main"],"permissions":["core:default","dialog:default"]}}
+{"default":{"identifier":"default","description":"Default capability for the main DramFlow剪映导入插件 window.","local":true,"windows":["main"],"permissions":["core:default","dialog:default"]}}
