@@ -89,7 +89,14 @@ jobs:
 
       - name: Build Tauri app
         working-directory: app
-        run: pnpm tauri build
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            # WiX/MSI 对中文产品名兼容性不好，Windows 端只产出 NSIS 安装器。
+            pnpm tauri build --bundles nsis
+          else
+            pnpm tauri build
+          fi
 
       - name: Collect bundles
         shell: bash
