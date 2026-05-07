@@ -285,6 +285,63 @@ fn test_write_draft_localizes_assets_into_output_directory() {
 }
 
 #[test]
+fn test_write_draft_can_preserve_external_asset_paths() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let temp_root = camino::Utf8Path::from_path(dir.path()).unwrap();
+    let output = temp_root.join("external_asset_draft");
+    let source_asset = temp_root.join("assets").join("source_clip.mp4");
+    std::fs::create_dir_all(source_asset.parent().unwrap()).unwrap();
+    std::fs::write(&source_asset, b"fake-video").unwrap();
+
+    let video_mat = VideoMaterialRef {
+        id: new_id(),
+        path: source_asset.clone(),
+        duration: 3_000_000,
+        width: 1920,
+        height: 1080,
+        kind: MaterialKind::Video,
+        crop: CropSettings::default(),
+        name: "source_clip.mp4".into(),
+    };
+
+    let project = Project {
+        id: new_id(),
+        name: "external_asset_output".into(),
+        canvas: Canvas::default(),
+        maintrack_adsorb: true,
+        tracks: vec![Track {
+            id: new_id(),
+            kind: TrackKind::Video,
+            name: "v1".into(),
+            render_index: 0,
+            mute: false,
+            clips: vec![make_video_clip(&video_mat, 0, 3_000_000)],
+        }],
+        video_materials: vec![video_mat],
+        audio_materials: vec![],
+        duration: 3_000_000,
+    };
+
+    jy_draft::writer::write_draft_with_options(
+        &project,
+        &output,
+        &jy_draft::writer::WriteDraftOptions {
+            localize_assets: false,
+        },
+    )
+    .expect("write should succeed");
+
+    assert!(!output.join("_assets").exists());
+
+    let content = std::fs::read_to_string(output.join("draft_content.json")).unwrap();
+    let json: Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        json["materials"]["videos"][0]["path"],
+        source_asset.as_str()
+    );
+}
+
+#[test]
 fn test_transform_conversion() {
     let t = Transform {
         x: 0.5,

@@ -12,14 +12,40 @@ use uuid::Uuid;
 /// - 输入：统一的 `Project`
 /// - 输出：草稿目录中的 `draft_content.json`、`draft_info.json` 和 `draft_meta_info.json`
 pub fn write_draft(project: &Project, output_dir: &Utf8Path) -> Result<(), DraftError> {
+    write_draft_with_options(project, output_dir, &WriteDraftOptions::default())
+}
+
+#[derive(Debug, Clone)]
+pub struct WriteDraftOptions {
+    pub localize_assets: bool,
+}
+
+impl Default for WriteDraftOptions {
+    fn default() -> Self {
+        Self {
+            localize_assets: true,
+        }
+    }
+}
+
+/// 写入草稿，并允许调用方控制是否把素材复制进草稿目录。
+pub fn write_draft_with_options(
+    project: &Project,
+    output_dir: &Utf8Path,
+    options: &WriteDraftOptions,
+) -> Result<(), DraftError> {
     // 先确保输出目录存在。
     std::fs::create_dir_all(output_dir)?;
 
-    // mac 上某些版本的剪映对工作区外素材访问更稳定，统一把本地素材复制到草稿目录内。
-    let localized_project = localize_project_assets(project, output_dir)?;
+    let project = if options.localize_assets {
+        // mac 上某些版本的剪映对工作区外素材访问更稳定，普通草稿仍默认复制到草稿目录内。
+        localize_project_assets(project, output_dir)?
+    } else {
+        project.clone()
+    };
 
     // 生成并写入主草稿内容。
-    let draft = project_to_draft(&localized_project)?;
+    let draft = project_to_draft(&project)?;
     let content_path = output_dir.join("draft_content.json");
     let content_str = serde_json::to_string_pretty(&draft)?;
     std::fs::write(&content_path, &content_str)?;
@@ -34,13 +60,10 @@ pub fn write_draft(project: &Project, output_dir: &Utf8Path) -> Result<(), Draft
         "{{{}}}",
         draft_id.as_hyphenated().to_string().to_uppercase()
     ));
-    meta["draft_name"] = json!(localized_project.name);
+    meta["draft_name"] = json!(project.name.clone());
     meta["draft_root_path"] = json!(output_dir_str);
     meta["draft_fold_path"] = json!(output_dir_str);
-    meta["tm_duration"] = json!(format!(
-        "{}.000000",
-        localized_project.duration / jy_schema::SEC
-    ));
+    meta["tm_duration"] = json!(format!("{}.000000", project.duration / jy_schema::SEC));
     meta["tm_draft_cloud_modified"] = json!(0);
     meta["tm_draft_modified"] = json!(chrono::Utc::now().timestamp());
 

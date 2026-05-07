@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
-use jy_draft::writer::write_draft;
+use jy_draft::writer::{write_draft_with_options, WriteDraftOptions};
 use jy_media::material::{create_audio_material, create_video_material};
 use jy_schema::{
     Canvas, Clip, MaterialKind, TextAlign, TextBorder, TextShadow, TextStyle, TimeRange, TrackKind,
@@ -173,10 +173,10 @@ pub fn run(
     let remote_sources = collect_remote_sources(&project);
 
     // 所有远程素材都会先落到本地，因为剪映草稿依赖本机绝对路径。
+    // VOD 是服务端打包链路，默认把素材放在草稿同级 assets/，避免草稿内重复出现 _assets。
     let assets_dir = assets_dir
         .map(Utf8PathBuf::from)
-        .unwrap_or_else(|| output.join("_assets"));
-    std::fs::create_dir_all(&assets_dir)?;
+        .unwrap_or_else(|| default_assets_dir(output));
 
     let project_name = name
         .map(str::to_string)
@@ -396,7 +396,13 @@ pub fn run(
     }
 
     let draft = builder.build();
-    write_draft(&draft, output)?;
+    write_draft_with_options(
+        &draft,
+        output,
+        &WriteDraftOptions {
+            localize_assets: false,
+        },
+    )?;
     if fetcher.remote_total() > 0 {
         output::emit_progress(
             "vod-json-to-draft",
@@ -432,6 +438,13 @@ pub fn run(
         }),
     );
     Ok(())
+}
+
+fn default_assets_dir(output: &Utf8Path) -> Utf8PathBuf {
+    output
+        .parent()
+        .map(|parent| parent.join("assets"))
+        .unwrap_or_else(|| Utf8PathBuf::from("assets"))
 }
 
 /// 预扫描 VOD 配置中的远程素材 URL，便于展示总进度。
@@ -1111,6 +1124,10 @@ mod tests {
         .unwrap();
 
         run(&config, None, &output, Some("overlap"), false).unwrap();
+        assert!(
+            !output.join("_assets").exists(),
+            "VOD output should not create draft-local _assets when assets are external"
+        );
 
         let draft: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(output.join("draft_content.json")).unwrap(),
@@ -1146,6 +1163,15 @@ mod tests {
         assert_eq!(
             draft["materials"]["texts"][0]["type"].as_str(),
             Some("subtitle")
+        );
+    }
+
+    #[test]
+    fn default_vod_assets_dir_is_sibling_assets_directory() {
+        let output = Utf8PathBuf::from("/tmp/project/draft");
+        assert_eq!(
+            default_assets_dir(&output),
+            Utf8PathBuf::from("/tmp/project/assets")
         );
     }
 

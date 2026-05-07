@@ -84,12 +84,14 @@ YingDraft 是一个用 Rust 编写的剪映草稿生成与编辑工具集。
 
 ## 草稿兼容性
 
-当前 `jy_draft` 在写草稿时做了两层兼容处理，`generate`、`generate-demo`、`import-bundle`、`vod-json-to-draft` 都会自动吃到：
+当前 `jy_draft` 在写草稿时做了两层兼容处理，`generate`、`generate-demo`、`import-bundle` 默认都会自动吃到：
 
 1. 同时写出 `draft_content.json` 和 `draft_info.json`
    这两份时间线文件内容保持一致，兼容不同版本剪映的草稿入口读取方式。
 2. 自动把本地视频、音频素材复制到草稿目录下的 `_assets/`
    草稿 JSON 会改为引用这些本地化后的路径，减少 mac 上因为工作区权限或外部路径不可读导致的素材丢失问题。
+
+`vod-json-to-draft` 是服务端打包链路，素材目录会按 `--assets-dir` 保持在草稿外部；如果不传 `--assets-dir`，默认使用输出草稿同级的 `assets/`，避免草稿目录里再复制一份 `_assets/` 造成空间和带宽浪费。
 
 这套兼容逻辑当前已经在本机的 mac 高版本剪映上通过实际生成草稿验证。
 
@@ -254,6 +256,8 @@ cargo run -p jy_cli -- vod-json-to-draft --help
 ```
 
 如果运行在阿里云同地域服务器上，可以加 `--use-internal-url`，让远程素材下载优先走 OSS 内网 Endpoint，降低公网流量成本。
+
+VOD 转换不会再把素材二次复制进草稿目录 `_assets/`。服务端打包时建议显式指定 `--assets-dir <项目根目录>/assets`；如果省略，默认会使用输出草稿同级的 `assets/`。
 
 ### 导入项目包并生成草稿
 
