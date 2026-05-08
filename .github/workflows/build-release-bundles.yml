@@ -1,18 +1,9 @@
 name: Build Release Bundles
 
 on:
-  workflow_dispatch:
-    inputs:
-      release_version:
-        description: "可选。填写 v0.1.0 这类版本号时创建/更新 GitHub Release；留空则只构建 Artifacts。"
-        required: false
-        type: string
   push:
-    branches:
-      - main
     tags:
       - "v*"
-  pull_request:
 
 permissions:
   contents: write
@@ -142,7 +133,7 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '')
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
@@ -155,16 +146,11 @@ jobs:
         id: release
         shell: bash
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            tag="${GITHUB_REF_NAME}"
-          else
-            tag="${{ github.event.inputs.release_version }}"
-          fi
-
+          tag="${GITHUB_REF_NAME}"
           tag="$(echo "$tag" | xargs)"
 
           if [[ -z "$tag" ]]; then
-            echo "release_version 为空，无法发布 Release。" >&2
+            echo "发布标签为空，无法发布 Release。" >&2
             exit 1
           fi
 
