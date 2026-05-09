@@ -40,9 +40,13 @@ const statusLine = document.querySelector<HTMLParagraphElement>("#status-line")!
 const resultPanel = document.querySelector<HTMLPreElement>("#result-panel")!;
 const importButton = document.querySelector<HTMLButtonElement>("#run-import")!;
 const openDraftDirButton = document.querySelector<HTMLButtonElement>("#open-draft-dir")!;
+const toast = document.querySelector<HTMLDivElement>("#toast")!;
 
 let currentInspection: BundleInspection | null = null;
 let latestDraftDir: string | null = null;
+let lastAutoDraftName: string | null = null;
+let draftNameWasEdited = false;
+let toastTimer: number | null = null;
 
 boot().catch((error) => {
   setStatus(`初始化失败：${stringifyError(error)}`);
@@ -65,6 +69,11 @@ importButton.addEventListener("click", async () => {
   await runImport();
 });
 
+draftNameInput.addEventListener("input", () => {
+  const current = draftNameInput.value.trim();
+  draftNameWasEdited = Boolean(current && current !== lastAutoDraftName);
+});
+
 openDraftDirButton.addEventListener("click", async () => {
   if (!latestDraftDir) {
     return;
@@ -73,14 +82,20 @@ openDraftDirButton.addEventListener("click", async () => {
   try {
     await invoke("open_path_in_file_manager", { path: latestDraftDir });
   } catch (error) {
-    resultPanel.textContent = stringifyError(error);
+    const message = toUserMessage(error);
+    resultPanel.textContent = message;
     setStatus("打开目录失败。");
+    showToast(message, "error");
   }
 });
 
 async function boot(): Promise<void> {
   const hasDraftBox = await fillDetectedDraftBox();
-  setStatus(hasDraftBox ? "请选择下载好的草稿项目目录。" : "没有检测到剪映草稿箱，请先打开剪映后重试。");
+  const message = hasDraftBox ? "请选择下载好的草稿项目目录。" : "没有检测到剪映草稿箱，请先打开剪映后重试。";
+  setStatus(message);
+  if (!hasDraftBox) {
+    showToast(message, "error");
+  }
 }
 
 async function fillDetectedDraftBox(): Promise<boolean> {
@@ -116,10 +131,18 @@ async function inspectCurrentSource(): Promise<void> {
       `轨道 ${inspection.track_count} 条`,
     ].join("<br>");
 
-    if (!draftNameInput.value.trim()) {
-      draftNameInput.value = normalizeDraftName(
-        inspection.project_name ?? inspection.project_id ?? "imported_bundle",
-      );
+    const nextDraftName = normalizeDraftName(
+      inspection.project_name ?? inspection.project_id ?? "imported_bundle",
+    );
+    const currentDraftName = draftNameInput.value.trim();
+    const shouldUseAutoName =
+      !currentDraftName || !draftNameWasEdited || currentDraftName === lastAutoDraftName;
+
+    lastAutoDraftName = nextDraftName;
+    if (shouldUseAutoName) {
+      draftNameInput.value = nextDraftName;
+      draftNameWasEdited = false;
+      showToast(`已自动更新草稿名：${nextDraftName}`, "success");
     }
 
     setStatus("项目没问题，可以开始生成了。");
@@ -127,8 +150,10 @@ async function inspectCurrentSource(): Promise<void> {
     currentInspection = null;
     summaryPanel.classList.add("empty");
     summaryPanel.textContent = "这个项目暂时读不了，请换一个再试。";
-    resultPanel.textContent = stringifyError(error);
+    const message = toUserMessage(error);
+    resultPanel.textContent = message;
     setStatus("检查失败。");
+    showToast(message, "error");
   }
 }
 
@@ -138,12 +163,16 @@ async function runImport(): Promise<void> {
   const draftName = draftNameInput.value.trim();
 
   if (!source || !draftName) {
-    setStatus("请先选择项目目录，并确认草稿名。");
+    const message = "请先选择项目目录，并确认草稿名。";
+    setStatus(message);
+    showToast(message, "warning");
     return;
   }
 
   if (!draftBoxDir) {
-    setStatus("没有检测到剪映草稿箱，请先打开剪映后重试。");
+    const message = "没有检测到剪映草稿箱，请先打开剪映后重试。";
+    setStatus(message);
+    showToast(message, "error");
     return;
   }
 
@@ -170,11 +199,14 @@ async function runImport(): Promise<void> {
       "现在可以去剪映里查看了。",
     ].join("\n");
     setStatus("生成完成。");
+    showToast("草稿生成成功，可以去剪映里查看了。", "success");
   } catch (error) {
     latestDraftDir = null;
     openDraftDirButton.classList.add("is-hidden");
-    resultPanel.textContent = stringifyError(error);
+    const message = toUserMessage(error);
+    resultPanel.textContent = message;
     setStatus("生成失败。");
+    showToast(message, "error");
   } finally {
     importButton.disabled = false;
   }
@@ -198,4 +230,28 @@ function stringifyError(error: unknown): string {
     return error.message;
   }
   return JSON.stringify(error, null, 2);
+}
+
+function toUserMessage(error: unknown): string {
+  const raw = stringifyError(error);
+  if (/output directory is not empty/i.test(raw)) {
+    return "这个草稿项目已经存在，请换一个草稿名，或者先删除剪映草稿箱里的同名草稿。";
+  }
+  if (/failed to inspect directory/i.test(raw) || /No such file or directory/i.test(raw)) {
+    return "这个项目目录读不了，请确认选择的是下载好的草稿目录。";
+  }
+  return raw || "操作失败，请换一个项目再试。";
+}
+
+function showToast(message: string, tone: "success" | "warning" | "error" = "success"): void {
+  if (toastTimer !== null) {
+    window.clearTimeout(toastTimer);
+  }
+
+  toast.textContent = message;
+  toast.className = `toast toast-${tone} is-visible`;
+  toastTimer = window.setTimeout(() => {
+    toast.classList.remove("is-visible");
+    toastTimer = null;
+  }, 4200);
 }
