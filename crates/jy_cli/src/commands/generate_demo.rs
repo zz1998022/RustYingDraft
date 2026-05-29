@@ -3,173 +3,107 @@ use camino::Utf8Path;
 use jy_draft::writer::write_draft;
 use jy_media::material::{create_audio_material, create_video_material};
 use jy_schema::{
-    AudioFade, Canvas, Clip, TextAlign, TextBorder, TextShadow, TextStyle, TimeRange, TrackKind,
-    Transform, SEC,
+    AnimationItem, AnimationRef, AudioFade, BackgroundFillType, BackgroundFillingRef, Canvas, Clip,
+    FontRef, TextBubbleRef, TextEffectRef, TextStyle, TimeRange, TrackKind, Transform,
+    TransitionRef, SEC,
 };
 use jy_timeline::builder::ProjectBuilder;
-use jy_timeline::clip::{make_audio_clip, make_image_clip, make_text_clip, make_video_clip};
+use jy_timeline::clip::{make_audio_clip, make_text_clip, make_video_clip};
 use serde_json::json;
+use std::process::Command;
 use uuid::Uuid;
 
 use crate::output;
-
-/// 解析后的 SRT 字幕片段。
-///
-/// `start/end` 统一使用剪映内部的微秒单位，避免后续在构建 `TimeRange`
-/// 时重复做秒到微秒的换算。
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SubtitleCue {
-    start: u64,
-    end: u64,
-    text: String,
-}
 
 /// 生成一个无连字符的 UUID，统一用于素材/效果等临时对象 ID。
 fn new_id() -> String {
     Uuid::new_v4().as_simple().to_string()
 }
 
-/// 生成“本地素材 + SRT”形式的 demo 草稿。
+/// 生成与 pyJianYingDraft 官方 demo.py 对齐的草稿。
 ///
-/// 这个命令是一个高层便捷入口，目的不是暴露完整的 schema，
-/// 而是让我们能快速验证 Rust 版草稿生成在真实素材上的效果。
+/// 当前命令参数仍沿用历史版本：
+/// - `video` 对应官方 demo 里的 video.mp4
+/// - `dubbing` 对应官方 demo 里的 audio.mp3
+/// - `watermark` 对应官方 demo 里的 sticker.gif
+///
+/// `bgm` 和 `subtitle` 暂时保留为兼容旧命令行形状，不参与官方 demo 生成。
 pub fn run(
     name: &str,
     video: &Utf8Path,
     dubbing: &Utf8Path,
-    bgm: &Utf8Path,
-    subtitle: &Utf8Path,
+    _bgm: &Utf8Path,
+    _subtitle: &Utf8Path,
     watermark: &Utf8Path,
     output: &Utf8Path,
 ) -> Result<()> {
-    // 第一步先把素材探测成统一的 MaterialRef，后续 timeline 层只依赖统一模型。
     let video_mat = create_video_material(video, None)
         .with_context(|| format!("failed to load video material: {video}"))?;
-    let dubbing_mat = create_audio_material(dubbing, None)
-        .with_context(|| format!("failed to load dubbing material: {dubbing}"))?;
-    let bgm_mat = create_audio_material(bgm, None)
-        .with_context(|| format!("failed to load bgm material: {bgm}"))?;
-    let watermark_mat = create_video_material(watermark, None)
-        .with_context(|| format!("failed to load watermark material: {watermark}"))?;
+    let audio_mat = create_audio_material(dubbing, None)
+        .with_context(|| format!("failed to load audio material: {dubbing}"))?;
+    let sticker_mat = create_video_material(watermark, None)
+        .with_context(|| format!("failed to load sticker material: {watermark}"))?;
 
-    let subtitle_cues = parse_srt(subtitle)
-        .with_context(|| format!("failed to parse subtitle file: {subtitle}"))?;
-    if subtitle_cues.is_empty() {
-        bail!("subtitle file contained no cues: {subtitle}");
-    }
-    let subtitle_count = subtitle_cues.len();
+    let canvas = Canvas::new(1920, 1080, 30);
+    let audio_duration = 5 * SEC;
+    let video_duration = 4_200_000;
+    let sticker_duration = py_compatible_gif_duration(watermark).unwrap_or(sticker_mat.duration);
 
-    // 当前 demo 直接沿用主视频的尺寸作为草稿画布。
-    let duration = video_mat.duration;
-    let canvas = Canvas::new(video_mat.width, video_mat.height, 30);
-
-    // 主视频作为底片轨，默认把原声静音，方便直接听配音 + BGM 的组合效果。
-    let main_video = make_video_clip(
-        &video_mat,
-        TimeRange::new(0, duration),
-        Some(TimeRange::new(0, duration)),
-        None,
-        0.0,
-        None,
-    )?;
-
-    // 水印作为一张覆盖在整段时间线上的图片片段处理。
-    let watermark_clip = make_image_clip(
-        &watermark_mat,
-        TimeRange::new(0, duration),
-        Some(Transform {
-            x: 0.86,
-            y: 0.11,
-            scale_x: 0.22,
-            scale_y: 0.22,
-            opacity: 0.82,
-            ..Default::default()
-        }),
-    );
-
-    // 配音和 BGM 都是音频轨；这里加一点淡入淡出，避免试听时过于生硬。
-    let dubbing_clip = add_audio_fade(
+    let audio_clip = add_audio_fade(
         make_audio_clip(
-            &dubbing_mat,
-            TimeRange::new(0, duration.min(dubbing_mat.duration)),
+            &audio_mat,
+            TimeRange::new(0, audio_duration.min(audio_mat.duration)),
+            Some(TimeRange::new(0, audio_duration.min(audio_mat.duration))),
             None,
-            None,
-            1.0,
-        )?,
-        300_000,
-        300_000,
-    )?;
-
-    let bgm_clip = add_audio_fade(
-        make_audio_clip(
-            &bgm_mat,
-            TimeRange::new(0, duration.min(bgm_mat.duration)),
-            None,
-            None,
-            0.22,
+            0.6,
         )?,
         SEC,
-        1_500_000,
+        0,
     )?;
 
-    // 字幕样式用一套固定配置，尽量接近此前 Python demo 的视觉效果。
-    let subtitle_style = TextStyle {
-        size: 7.2,
-        color: (1.0, 1.0, 1.0),
-        align: TextAlign::Center,
-        auto_wrapping: true,
-        max_line_width: 0.82,
-        ..Default::default()
-    };
-    let subtitle_border = TextBorder {
-        alpha: 1.0,
-        color: (0.0, 0.0, 0.0),
-        width: 55.0 / 100.0 * 0.2,
-    };
-    let subtitle_shadow = TextShadow {
-        alpha: 0.5,
-        color: (0.0, 0.0, 0.0),
-        diffuse: 20.0,
-        distance: 6.0,
-        angle: -45.0,
-    };
-    let subtitle_transform = Transform {
-        x: 0.5,
-        y: 0.09,
-        ..Default::default()
-    };
+    let video_clip = add_py_demo_video_effects(make_video_clip(
+        &video_mat,
+        TimeRange::new(0, video_duration),
+        Some(TimeRange::new(0, video_duration)),
+        None,
+        1.0,
+        None,
+    )?)?;
 
-    // ProjectBuilder 负责做轨道去重、轨道名校验、片段重叠校验和总时长维护。
-    let mut builder = ProjectBuilder::new(name, canvas)
+    let sticker_clip = add_background_blur(make_video_clip(
+        &sticker_mat,
+        TimeRange::new(video_duration, sticker_duration),
+        Some(TimeRange::new(0, sticker_duration)),
+        None,
+        1.0,
+        None,
+    )?)?;
+
+    let text_clip = add_py_demo_text_effects(make_text_clip(
+        "据说pyJianYingDraft效果还不错?",
+        TimeRange::new(0, video_duration),
+        Some(TextStyle {
+            color: (1.0, 1.0, 0.0),
+            ..Default::default()
+        }),
+        Some(Transform {
+            y: 0.1,
+            ..Default::default()
+        }),
+    ))?;
+
+    let builder = ProjectBuilder::new(name, canvas)
         .maintrack_adsorb(true)
-        .add_track(TrackKind::Video, "main_video", 0)?
-        .add_track(TrackKind::Video, "watermark", 100)?
-        .add_track(TrackKind::Audio, "dubbing", 0)?
-        .add_track(TrackKind::Audio, "bgm", 1)?
-        .add_track(TrackKind::Text, "subtitle", 999)?
+        .add_track(TrackKind::Audio, "audio", 0)?
+        .add_track(TrackKind::Video, "video", 0)?
+        .add_track(TrackKind::Text, "text", 0)?
         .add_video_material(video_mat)
-        .add_video_material(watermark_mat)
-        .add_audio_material(dubbing_mat)
-        .add_audio_material(bgm_mat)
-        .add_clip_to_track("main_video", main_video)?
-        .add_clip_to_track("watermark", watermark_clip)?
-        .add_clip_to_track("dubbing", dubbing_clip)?
-        .add_clip_to_track("bgm", bgm_clip)?;
-
-    // 每条字幕 cue 都转成一个独立的 TextClip，方便后续继续做模板替换或样式重算。
-    for cue in subtitle_cues {
-        let text_clip = add_text_decoration(
-            make_text_clip(
-                &cue.text,
-                TimeRange::new(cue.start, cue.end - cue.start),
-                Some(subtitle_style.clone()),
-                Some(subtitle_transform.clone()),
-            ),
-            Some(subtitle_border.clone()),
-            Some(subtitle_shadow.clone()),
-        )?;
-        builder = builder.add_clip_to_track("subtitle", text_clip)?;
-    }
+        .add_video_material(sticker_mat)
+        .add_audio_material(audio_mat)
+        .add_clip_to_track("audio", audio_clip)?
+        .add_clip_to_track("video", video_clip)?
+        .add_clip_to_track("video", sticker_clip)?
+        .add_clip_to_track("text", text_clip)?;
 
     let project = builder.build();
     let summary = json!({
@@ -179,13 +113,10 @@ pub fn run(
         "track_count": project.tracks.len(),
         "video_material_count": project.video_materials.len(),
         "audio_material_count": project.audio_materials.len(),
-        "subtitle_count": subtitle_count,
         "inputs": {
             "video": video.as_str(),
-            "dubbing": dubbing.as_str(),
-            "bgm": bgm.as_str(),
-            "subtitle": subtitle.as_str(),
-            "watermark": watermark.as_str(),
+            "audio": dubbing.as_str(),
+            "sticker": watermark.as_str(),
         }
     });
 
@@ -196,6 +127,84 @@ pub fn run(
         summary,
     );
     Ok(())
+}
+
+fn add_py_demo_video_effects(clip: Clip) -> Result<Clip> {
+    match clip {
+        Clip::Video(mut vc) => {
+            vc.animations = Some(AnimationRef {
+                id: new_id(),
+                animations: vec![AnimationItem {
+                    name: "斜切".into(),
+                    effect_id: "10696371".into(),
+                    animation_type: "in".into(),
+                    resource_id: "7210657307938525751".into(),
+                    start: 0,
+                    duration: 700_000,
+                    is_video_animation: true,
+                }],
+            });
+            vc.transition = Some(TransitionRef {
+                id: new_id(),
+                name: "信号故障".into(),
+                effect_id: "25265947".into(),
+                resource_id: "7288149307197231676".into(),
+                duration: 500_000,
+                is_overlap: true,
+            });
+            Ok(Clip::Video(vc))
+        }
+        other => bail!("expected video clip, got {:?}", clip_kind(&other)),
+    }
+}
+
+fn add_background_blur(clip: Clip) -> Result<Clip> {
+    match clip {
+        Clip::Video(mut vc) => {
+            vc.background_filling = Some(BackgroundFillingRef {
+                id: new_id(),
+                fill_type: BackgroundFillType::Blur,
+                blur: 0.0625,
+                color: "#00000000".into(),
+            });
+            Ok(Clip::Video(vc))
+        }
+        other => bail!("expected video clip, got {:?}", clip_kind(&other)),
+    }
+}
+
+fn add_py_demo_text_effects(clip: Clip) -> Result<Clip> {
+    match clip {
+        Clip::Text(mut tc) => {
+            tc.font = Some(FontRef {
+                resource_id: "7290445778273702455".into(),
+            });
+            tc.animations = Some(AnimationRef {
+                id: new_id(),
+                animations: vec![AnimationItem {
+                    name: "故障闪动".into(),
+                    effect_id: "15261509".into(),
+                    animation_type: "out".into(),
+                    resource_id: "7244102414377161276".into(),
+                    start: 3_200_000,
+                    duration: SEC,
+                    is_video_animation: false,
+                }],
+            });
+            tc.bubble = Some(TextBubbleRef {
+                id: new_id(),
+                effect_id: "361595".into(),
+                resource_id: "6742029398926430728".into(),
+            });
+            tc.effect = Some(TextEffectRef {
+                id: new_id(),
+                effect_id: "7296357486490144036".into(),
+                resource_id: "7296357486490144036".into(),
+            });
+            Ok(Clip::Text(tc))
+        }
+        other => bail!("expected text clip, got {:?}", clip_kind(&other)),
+    }
 }
 
 /// 给音频片段附加淡入淡出效果。
@@ -216,22 +225,6 @@ fn add_audio_fade(clip: Clip, in_duration: u64, out_duration: u64) -> Result<Cli
     }
 }
 
-/// 给文本片段补充描边和阴影效果。
-fn add_text_decoration(
-    clip: Clip,
-    border: Option<TextBorder>,
-    shadow: Option<TextShadow>,
-) -> Result<Clip> {
-    match clip {
-        Clip::Text(mut tc) => {
-            tc.border = border;
-            tc.shadow = shadow;
-            Ok(Clip::Text(tc))
-        }
-        other => bail!("expected text clip, got {:?}", clip_kind(&other)),
-    }
-}
-
 /// 仅用于报错信息，让 CLI 在类型不匹配时输出更易读的类型名。
 fn clip_kind(clip: &Clip) -> &'static str {
     match clip {
@@ -242,111 +235,65 @@ fn clip_kind(clip: &Clip) -> &'static str {
     }
 }
 
-/// 读取并解析 SRT 文件。
-///
-/// 这里做了两件兼容处理：
-/// 1. 统一换行风格，兼容 `\r\n` 和 `\n`
-/// 2. 兼容带序号和不带序号的 block
-fn parse_srt(path: &Utf8Path) -> Result<Vec<SubtitleCue>> {
-    let content = std::fs::read_to_string(path)?;
-    let normalized = content.replace("\r\n", "\n");
-    let mut cues = Vec::new();
+fn py_compatible_gif_duration(path: &Utf8Path) -> Option<u64> {
+    if !path
+        .extension()
+        .map(|ext| ext.eq_ignore_ascii_case("gif"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
 
-    for block in normalized.split("\n\n") {
-        let mut lines = block.lines().map(str::trim).filter(|line| !line.is_empty());
-        let Some(first_line) = lines.next() else {
-            continue;
-        };
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_frames,avg_frame_rate",
+            "-of",
+            "json",
+        ])
+        .arg(path.as_str())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
 
-        let timestamp_line = if first_line.chars().all(|ch| ch.is_ascii_digit()) {
-            lines
-                .next()
-                .context("subtitle block is missing timestamp line after index")?
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        streams: Vec<ProbeStream>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ProbeStream {
+        nb_frames: Option<String>,
+        avg_frame_rate: Option<String>,
+    }
+
+    let probe: Probe = serde_json::from_slice(&output.stdout).ok()?;
+    let stream = probe.streams.first()?;
+    let frames = stream.nb_frames.as_ref()?.parse::<f64>().ok()?;
+    let fps = parse_fraction(stream.avg_frame_rate.as_deref()?)?;
+    if frames <= 0.0 || fps <= 0.0 {
+        return None;
+    }
+
+    Some((frames / fps * SEC as f64).round() as u64)
+}
+
+fn parse_fraction(value: &str) -> Option<f64> {
+    if let Some((numerator, denominator)) = value.split_once('/') {
+        let numerator = numerator.parse::<f64>().ok()?;
+        let denominator = denominator.parse::<f64>().ok()?;
+        if denominator == 0.0 {
+            None
         } else {
-            first_line
-        };
-
-        let (start, end) = parse_srt_timerange(timestamp_line)?;
-        let text_lines: Vec<&str> = lines.collect();
-        if text_lines.is_empty() {
-            continue;
+            Some(numerator / denominator)
         }
-
-        cues.push(SubtitleCue {
-            start,
-            end,
-            text: text_lines.join("\n"),
-        });
-    }
-
-    Ok(cues)
-}
-
-/// 解析一行 `00:00:01,000 --> 00:00:02,500` 形式的 SRT 时间范围。
-fn parse_srt_timerange(line: &str) -> Result<(u64, u64)> {
-    let (start, end) = line
-        .split_once("-->")
-        .context("invalid srt timerange line")?;
-    let start = parse_srt_timestamp(start.trim())?;
-    let end = parse_srt_timestamp(end.trim())?;
-    if end <= start {
-        bail!("subtitle cue end must be greater than start: {line}");
-    }
-    Ok((start, end))
-}
-
-/// 将单个 SRT 时间戳转换成微秒。
-fn parse_srt_timestamp(value: &str) -> Result<u64> {
-    let value = value.replace(',', ".");
-    let parts: Vec<&str> = value.split(':').collect();
-    if parts.len() != 3 {
-        bail!("invalid srt timestamp: {value}");
-    }
-
-    let hours: u64 = parts[0].parse().context("invalid srt hour component")?;
-    let minutes: u64 = parts[1].parse().context("invalid srt minute component")?;
-    let seconds: f64 = parts[2].parse().context("invalid srt second component")?;
-
-    Ok((hours * 3600 * SEC as u64) + (minutes * 60 * SEC as u64) + (seconds * SEC as f64) as u64)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_srt_timestamp_to_microseconds() {
-        assert_eq!(parse_srt_timestamp("00:00:21,674").unwrap(), 21_674_000);
-        assert_eq!(parse_srt_timestamp("01:02:03.500").unwrap(), 3_723_500_000);
-    }
-
-    #[test]
-    fn parses_srt_blocks_with_index_and_multiline_text() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = Utf8Path::from_path(tempdir.path())
-            .unwrap()
-            .join("sample.srt");
-        std::fs::write(
-            path.as_std_path(),
-            "1\n00:00:01,000 --> 00:00:02,500\n第一行\n第二行\n\n2\n00:00:03,000 --> 00:00:04,000\n第三行\n",
-        )
-        .unwrap();
-
-        let cues = parse_srt(&path).unwrap();
-        assert_eq!(
-            cues,
-            vec![
-                SubtitleCue {
-                    start: 1_000_000,
-                    end: 2_500_000,
-                    text: "第一行\n第二行".into(),
-                },
-                SubtitleCue {
-                    start: 3_000_000,
-                    end: 4_000_000,
-                    text: "第三行".into(),
-                }
-            ]
-        );
+    } else {
+        value.parse::<f64>().ok()
     }
 }
