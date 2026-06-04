@@ -6,12 +6,13 @@
 
 ## 1. 包类型
 
-`bundle_type` 当前支持两个值：
+`bundle_type` 当前支持三个值：
 
 | 值 | 用途 |
 | --- | --- |
 | `draft_package` | 包内已经包含剪映草稿，本地导入时只重写素材路径 |
 | `timeline_package` | 包内提供时间轴描述，本地导入时重新生成剪映草稿 |
+| `simple_timeline_package` | 内部生产用简化时间轴包，仅支持顺序拼视频和字幕 |
 
 当前业务优先使用 `draft_package`。
 
@@ -75,12 +76,12 @@ package_root/assets/video_0001.mp4
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `bundle_version` | `number` | 是 | 当前为 `1` |
-| `bundle_type` | `string` | 是 | `draft_package` 或 `timeline_package` |
+| `bundle_type` | `string` | 是 | `draft_package`、`timeline_package` 或 `simple_timeline_package` |
 | `project_id` | `string` | 否 | 业务侧项目 ID |
 | `project_name` | `string` | 否 | 草稿默认名称 |
 | `assets_dir` | `string` | 否 | 素材目录，通常为 `assets` |
 | `draft_dir` | `string` | `draft_package` 必填 | 草稿目录，通常为 `draft` |
-| `timeline_file` | `string` | `timeline_package` 必填 | 时间轴描述文件 |
+| `timeline_file` | `string` | `timeline_package` / `simple_timeline_package` 必填 | 时间轴描述文件 |
 
 ## 5. `draft_package`
 
@@ -212,7 +213,89 @@ package_root/
 
 `timeline.json` 的结构由导入器单独解析，不在本文展开。
 
-## 7. 后端出包流程
+## 7. `simple_timeline_package`
+
+该模式用于内部批量生成普通剪映草稿，不走 VOD 兼容层。第一版只支持：
+
+- 多个视频素材按数组顺序整段拼接
+- JSON 字幕
+- 全局字幕字号
+- 全局字幕位置
+
+目录：
+
+```text
+package_root/
+  bundle.json
+  timeline.json
+  assets/
+    video_001.mp4
+    video_002.mp4
+```
+
+`bundle.json` 示例：
+
+```json
+{
+  "bundle_version": 1,
+  "bundle_type": "simple_timeline_package",
+  "project_id": "batch_demo_001",
+  "project_name": "批量草稿示例",
+  "timeline_file": "timeline.json",
+  "assets_dir": "assets"
+}
+```
+
+`timeline.json` 示例：
+
+```json
+{
+  "canvas": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30
+  },
+  "videos": [
+    { "path": "video_001.mp4" },
+    { "path": "video_002.mp4" }
+  ],
+  "subtitle_style": {
+    "font_size": 8.0,
+    "x": 0.5,
+    "y": 0.82
+  },
+  "subtitles": [
+    { "start": 0.0, "end": 2.4, "text": "第一句字幕" },
+    { "start": 2.4, "end": 5.1, "text": "第二句字幕" }
+  ]
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `canvas` | `object` | 否 | 默认使用项目内默认画布；建议生产侧显式传入 |
+| `videos` | `array` | 是 | 至少一个视频，按顺序整段拼接 |
+| `videos[].path` | `string` | 是 | 相对 `assets_dir` 的视频路径，只允许 `/` 分隔 |
+| `videos[].name` | `string` | 否 | 导入后显示的素材名 |
+| `subtitle_style.font_size` | `number` | 否 | 字幕字号，默认 `8.0` |
+| `subtitle_style.x` | `number` | 否 | 字幕归一化横坐标，`0.5` 为水平居中 |
+| `subtitle_style.y` | `number` | 否 | 字幕归一化纵坐标，越大越靠下，默认 `0.82` |
+| `subtitles[].start` | `number` | 是 | 字幕开始时间，单位秒 |
+| `subtitles[].end` | `number` | 是 | 字幕结束时间，单位秒 |
+| `subtitles[].text` | `string` | 是 | 字幕文本 |
+
+校验规则：
+
+- `videos` 不能为空
+- 所有视频必须存在于 `assets_dir`
+- `videos[].path` 不能是绝对路径，不能包含 `..`，不能使用 Windows 反斜杠
+- 字幕 `end` 必须大于 `start`
+- 字幕结束时间不能超过拼接后的视频总时长
+- 第一版不支持裁剪、空隙、转场、贴纸、音频、多字幕样式、多轨混排
+
+## 8. 后端出包流程
 
 使用阿里云 VOD JSON 的场景，推荐流程如下：
 
@@ -237,12 +320,12 @@ package_root/
   YingDraft Companion.exe
 ```
 
-## 8. 校验清单
+## 9. 校验清单
 
 出包前建议检查：
 
 - `bundle_version` 为 `1`
-- `bundle_type` 为 `draft_package`
+- `bundle_type` 为 `draft_package`、`timeline_package` 或 `simple_timeline_package`
 - `draft/draft_content.json` 存在
 - `draft/draft_info.json` 存在
 - `draft/draft_meta_info.json` 存在

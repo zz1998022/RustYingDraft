@@ -27,6 +27,7 @@ desktop.ini
 .env
 .env.*
 !.env.example
+AGENTS.md
 
 # Tauri / frontend local artifacts if added later
 node_modules/
