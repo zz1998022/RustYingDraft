@@ -96,7 +96,7 @@ enum Command {
         #[arg(short, long)]
         output: camino::Utf8PathBuf,
     },
-    /// 将 bundle.json + timeline.json 项目包导入为当前机器可打开的剪映草稿。
+    /// 将 bundle 项目包导入为当前机器可打开的剪映草稿。
     ImportBundle {
         #[arg(long)]
         source: camino::Utf8PathBuf,

@@ -3,10 +3,16 @@ import "./styles.css";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
+type BundleType =
+  | "draft_package"
+  | "timeline_package"
+  | "simple_timeline_package"
+  | "pipeline_package";
+
 type BundleInspection = {
   source: string;
   bundle_root: string;
-  bundle_type: string;
+  bundle_type: BundleType | string;
   timeline_file: string | null;
   source_draft_dir: string | null;
   project_id: string | null;
@@ -19,7 +25,7 @@ type BundleInspection = {
 type ImportBundleSummary = {
   source: string;
   bundle_root: string;
-  bundle_type: string;
+  bundle_type: BundleType | string;
   timeline_file: string | null;
   source_draft_dir: string | null;
   draft_dir: string;
@@ -126,8 +132,9 @@ async function inspectCurrentSource(): Promise<void> {
     summaryPanel.classList.remove("empty");
     summaryPanel.innerHTML = [
       `<strong>${inspection.project_name ?? "已读取项目"}</strong>`,
-      `类型：${inspection.bundle_type === "draft_package" ? "现有草稿包" : "时间轴项目包"}`,
+      `类型：${getBundleTypeLabel(inspection.bundle_type)}`,
       `素材 ${inspection.asset_count} 个`,
+      `素材类型：${summarizeAssetKinds(inspection.asset_kinds)}`,
       `轨道 ${inspection.track_count} 条`,
     ].join("<br>");
 
@@ -218,6 +225,43 @@ function normalizeDraftName(value: string): string {
   return sanitized || "imported_bundle";
 }
 
+function getBundleTypeLabel(bundleType: string): string {
+  switch (bundleType) {
+    case "draft_package":
+      return "现有草稿包";
+    case "timeline_package":
+      return "时间轴项目包";
+    case "simple_timeline_package":
+      return "简化时间轴包";
+    case "pipeline_package":
+      return "后端流水线包";
+    default:
+      return bundleType || "未知项目包";
+  }
+}
+
+function summarizeAssetKinds(assetKinds: string[]): string {
+  if (assetKinds.length === 0) {
+    return "无";
+  }
+
+  const counts = assetKinds.reduce<Record<string, number>>((accumulator, kind) => {
+    accumulator[kind] = (accumulator[kind] ?? 0) + 1;
+    return accumulator;
+  }, {});
+
+  const labels: Record<string, string> = {
+    video: "视频",
+    audio: "音频",
+    image: "图片",
+    sticker: "贴纸",
+  };
+
+  return Object.entries(counts)
+    .map(([kind, count]) => `${labels[kind] ?? kind} ${count}`)
+    .join("，");
+}
+
 function setStatus(message: string): void {
   statusLine.textContent = message;
 }
@@ -236,6 +280,30 @@ function toUserMessage(error: unknown): string {
   const raw = stringifyError(error);
   if (/output directory is not empty/i.test(raw)) {
     return "这个草稿项目已经存在，请换一个草稿名，或者先删除剪映草稿箱里的同名草稿。";
+  }
+  if (/pipeline\.audio_file is no longer supported/i.test(raw)) {
+    return "这个项目包还是旧版单音频格式，请把 bundle.json 改成 pipeline.narration_files 分段解说音频列表。";
+  }
+  if (/pipeline\.narration_files length/i.test(raw)) {
+    return "解说音频数量和 SRT 字幕条数不一致，请确认 narration_files 的顺序和数量都对应 subtitle.srt。";
+  }
+  if (/pipeline\.narration_files must contain at least one/i.test(raw)) {
+    return "这个项目包缺少分段解说音频，请在 bundle.json 里填写 pipeline.narration_files。";
+  }
+  if (/concat\.txt is empty/i.test(raw)) {
+    return "concat.txt 里没有视频条目，请至少写一行 file 'video_001.mp4'。";
+  }
+  if (/path must use forward slash|path must not contain backslash/i.test(raw)) {
+    return "项目包里的素材路径必须使用正斜杠 /，不要使用 Windows 反斜杠。";
+  }
+  if (/path must be relative|absolute path|url/i.test(raw)) {
+    return "项目包里的素材路径必须是相对 assets 目录的本地路径，不能使用绝对路径或 URL。";
+  }
+  if (/subtitle .* exceeds video duration|subtitle.*out of/i.test(raw)) {
+    return "SRT 字幕时间超过了拼接后视频总时长，请检查 subtitle.srt 的结束时间。";
+  }
+  if (/ffprobe/i.test(raw)) {
+    return `读取媒体时长失败，请确认本机已安装 ffmpeg/ffprobe 并能在命令行直接运行。原始错误：${raw}`;
   }
   if (/failed to inspect directory/i.test(raw) || /No such file or directory/i.test(raw)) {
     return "这个项目目录读不了，请确认选择的是下载好的草稿目录。";

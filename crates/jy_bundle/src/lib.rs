@@ -80,6 +80,11 @@ struct BundleManifest {
     match_key: DraftMatchKey,
     #[serde(default)]
     assets: Vec<DraftAssetBinding>,
+    pipeline: Option<PipelineSpec>,
+    #[serde(default)]
+    subtitle_style: SimpleSubtitleStyle,
+    #[serde(default)]
+    audio_style: PipelineAudioStyle,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
@@ -89,6 +94,7 @@ enum BundleType {
     TimelinePackage,
     DraftPackage,
     SimpleTimelinePackage,
+    PipelinePackage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +172,38 @@ struct SimpleSubtitleCue {
     start: f64,
     end: f64,
     text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PipelineSpec {
+    concat_file: String,
+    subtitle_file: String,
+    #[serde(default)]
+    narration_files: Vec<String>,
+    audio_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PipelineAudioStyle {
+    #[serde(default = "default_pipeline_volume")]
+    video_volume: f64,
+    #[serde(default = "default_pipeline_volume")]
+    narration_volume: f64,
+    audio_volume: Option<f64>,
+}
+
+impl Default for PipelineAudioStyle {
+    fn default() -> Self {
+        Self {
+            video_volume: default_pipeline_volume(),
+            narration_volume: default_pipeline_volume(),
+            audio_volume: None,
+        }
+    }
+}
+
+fn default_pipeline_volume() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Deserialize)]
@@ -327,6 +365,7 @@ where
         BundleType::SimpleTimelinePackage => {
             import_simple_timeline_package(options, &prepared, &bundle)
         }
+        BundleType::PipelinePackage => import_pipeline_package(options, &prepared, &bundle),
     }
 }
 
@@ -343,6 +382,7 @@ pub fn inspect_bundle_source(source: &Utf8Path) -> Result<BundleInspection> {
         BundleType::SimpleTimelinePackage => {
             inspect_simple_timeline_package(source, &prepared, &bundle)
         }
+        BundleType::PipelinePackage => inspect_pipeline_package(source, &prepared, &bundle),
     }
 }
 
@@ -656,6 +696,154 @@ fn import_simple_timeline_package(
     })
 }
 
+fn import_pipeline_package(
+    options: &ImportBundleOptions,
+    prepared: &PreparedSource,
+    bundle: &BundleManifest,
+) -> Result<ImportBundleSummary> {
+    let pipeline = bundle
+        .pipeline
+        .as_ref()
+        .ok_or_else(|| anyhow!("pipeline_package requires bundle.pipeline"))?;
+    validate_simple_subtitle_style(&bundle.subtitle_style)?;
+    validate_pipeline_audio_style(&bundle.audio_style)?;
+
+    validate_pipeline_spec(pipeline)?;
+    let concat_path = resolve_pipeline_asset_path(
+        "pipeline.concat_file",
+        &pipeline.concat_file,
+        &prepared.bundle_root,
+        bundle.assets_dir.as_deref(),
+    )?;
+    let subtitle_path = resolve_pipeline_asset_path(
+        "pipeline.subtitle_file",
+        &pipeline.subtitle_file,
+        &prepared.bundle_root,
+        bundle.assets_dir.as_deref(),
+    )?;
+
+    let video_files = parse_concat_file(&concat_path)
+        .with_context(|| format!("failed to parse concat file: {concat_path}"))?;
+    let subtitles = parse_srt_file(&subtitle_path)
+        .with_context(|| format!("failed to parse subtitle file: {subtitle_path}"))?;
+    validate_pipeline_narration_count(&pipeline.narration_files, &subtitles)?;
+
+    let project_name = options
+        .name_override
+        .clone()
+        .or_else(|| bundle.project_name.clone())
+        .unwrap_or_else(|| "imported_bundle".to_string());
+
+    let mut builder = ProjectBuilder::new(&project_name, Canvas::default())
+        .maintrack_adsorb(true)
+        .add_track(TrackKind::Video, "main_video", 0)?
+        .add_track(TrackKind::Audio, "audio", 0)?
+        .add_track(TrackKind::Text, "subtitle", 0)?;
+
+    let mut cursor = 0_u64;
+    for (index, video_file) in video_files.iter().enumerate() {
+        let material_path = resolve_pipeline_asset_path(
+            &format!("concat file[{index}]"),
+            video_file,
+            &prepared.bundle_root,
+            bundle.assets_dir.as_deref(),
+        )
+        .with_context(|| format!("invalid concat file[{index}] path"))?;
+        let material = create_video_material(&material_path, None)
+            .with_context(|| format!("failed to load concat video[{index}]: {video_file}"))?;
+        if material.kind != MaterialKind::Video {
+            bail!("concat video[{index}] is not a video material: {video_file}");
+        }
+        if material.duration == 0 {
+            bail!("concat video[{index}] duration is zero: {video_file}");
+        }
+
+        let target = TimeRange::new(cursor, material.duration);
+        let clip = make_video_clip(
+            &material,
+            target,
+            None,
+            None,
+            bundle.audio_style.video_volume,
+            None,
+        )
+        .with_context(|| format!("failed to build concat video[{index}] clip"))?;
+        cursor = cursor
+            .checked_add(material.duration)
+            .ok_or_else(|| anyhow!("pipeline_package duration overflow"))?;
+
+        builder = builder
+            .add_video_material(material)
+            .add_clip_to_track("main_video", clip)?;
+    }
+
+    let text_style = build_simple_subtitle_style(&bundle.subtitle_style)?;
+    let text_transform = build_simple_subtitle_transform(&bundle.subtitle_style)?;
+    for (index, cue) in subtitles.iter().enumerate() {
+        let start = seconds_to_micros(cue.start, &format!("subtitle.srt[{index}].start"))?;
+        let end = seconds_to_micros(cue.end, &format!("subtitle.srt[{index}].end"))?;
+        if end > cursor {
+            bail!("subtitle.srt[{index}] end exceeds stitched video duration");
+        }
+        let narration_file = &pipeline.narration_files[index];
+        let narration_path = resolve_pipeline_asset_path(
+            &format!("pipeline.narration_files[{index}]"),
+            narration_file,
+            &prepared.bundle_root,
+            bundle.assets_dir.as_deref(),
+        )
+        .with_context(|| format!("invalid pipeline.narration_files[{index}] path"))?;
+        let audio_material = create_audio_material(&narration_path, None).with_context(|| {
+            format!("failed to load pipeline narration[{index}]: {narration_file}")
+        })?;
+        let cue_duration = end - start;
+        let audio_duration = audio_material.duration.min(cue_duration);
+        if audio_duration == 0 {
+            bail!("pipeline narration[{index}] duration is zero");
+        }
+        let audio_clip = make_audio_clip(
+            &audio_material,
+            TimeRange::new(start, audio_duration),
+            Some(TimeRange::new(0, audio_duration)),
+            None,
+            bundle.audio_style.narration_volume,
+        )?;
+        builder = builder
+            .add_audio_material(audio_material)
+            .add_clip_to_track("audio", audio_clip)?;
+
+        let clip = make_text_clip(
+            &cue.text,
+            TimeRange::new(start, end - start),
+            Some(text_style.clone()),
+            Some(text_transform.clone()),
+        );
+        builder = builder.add_clip_to_track("subtitle", clip)?;
+    }
+
+    let mut project = builder.build();
+    project.id = bundle.project_id.clone().unwrap_or(project.id);
+
+    ensure_output_dir_ready(&options.output)?;
+    write_draft(&project, &options.output)?;
+
+    Ok(ImportBundleSummary {
+        source: options.source.as_str().to_string(),
+        bundle_root: prepared.bundle_root.as_str().to_string(),
+        bundle_type: "pipeline_package".to_string(),
+        timeline_file: None,
+        source_draft_dir: None,
+        draft_dir: options.output.as_str().to_string(),
+        project_id: project.id,
+        name: project.name,
+        duration: project.duration,
+        track_count: project.tracks.len(),
+        asset_count: video_files.len() + pipeline.narration_files.len(),
+        video_material_count: project.video_materials.len(),
+        audio_material_count: project.audio_materials.len(),
+    })
+}
+
 fn inspect_timeline_package(
     source: &Utf8Path,
     prepared: &PreparedSource,
@@ -730,6 +918,67 @@ fn inspect_simple_timeline_package(
             .iter()
             .map(|_| "video".to_string())
             .collect(),
+    })
+}
+
+fn inspect_pipeline_package(
+    source: &Utf8Path,
+    prepared: &PreparedSource,
+    bundle: &BundleManifest,
+) -> Result<BundleInspection> {
+    let pipeline = bundle
+        .pipeline
+        .as_ref()
+        .ok_or_else(|| anyhow!("pipeline_package requires bundle.pipeline"))?;
+    validate_simple_subtitle_style(&bundle.subtitle_style)?;
+    validate_pipeline_audio_style(&bundle.audio_style)?;
+    validate_pipeline_spec(pipeline)?;
+
+    let concat_path = resolve_pipeline_asset_path(
+        "pipeline.concat_file",
+        &pipeline.concat_file,
+        &prepared.bundle_root,
+        bundle.assets_dir.as_deref(),
+    )?;
+    let subtitle_path = resolve_pipeline_asset_path(
+        "pipeline.subtitle_file",
+        &pipeline.subtitle_file,
+        &prepared.bundle_root,
+        bundle.assets_dir.as_deref(),
+    )?;
+
+    let video_files = parse_concat_file(&concat_path)
+        .with_context(|| format!("failed to parse concat file: {concat_path}"))?;
+    let subtitles = parse_srt_file(&subtitle_path)
+        .with_context(|| format!("failed to parse subtitle file: {subtitle_path}"))?;
+    validate_pipeline_narration_count(&pipeline.narration_files, &subtitles)?;
+    for (index, narration_file) in pipeline.narration_files.iter().enumerate() {
+        resolve_pipeline_asset_path(
+            &format!("pipeline.narration_files[{index}]"),
+            narration_file,
+            &prepared.bundle_root,
+            bundle.assets_dir.as_deref(),
+        )
+        .with_context(|| format!("invalid pipeline.narration_files[{index}] path"))?;
+    }
+
+    let mut asset_kinds = video_files
+        .iter()
+        .map(|_| "video".to_string())
+        .collect::<Vec<_>>();
+    asset_kinds.extend(pipeline.narration_files.iter().map(|_| "audio".to_string()));
+
+    Ok(BundleInspection {
+        source: source.as_str().to_string(),
+        bundle_root: prepared.bundle_root.as_str().to_string(),
+        bundle_type: "pipeline_package".to_string(),
+        timeline_file: None,
+        source_draft_dir: None,
+        project_id: bundle.project_id.clone(),
+        project_name: bundle.project_name.clone(),
+        asset_count: video_files.len() + pipeline.narration_files.len(),
+        track_count: 3,
+        asset_kinds,
     })
 }
 
@@ -965,6 +1214,43 @@ fn validate_simple_subtitle_style(style: &SimpleSubtitleStyle) -> Result<()> {
     Ok(())
 }
 
+fn validate_pipeline_audio_style(style: &PipelineAudioStyle) -> Result<()> {
+    if !style.video_volume.is_finite() || style.video_volume < 0.0 {
+        bail!("audio_style.video_volume must be non-negative");
+    }
+    if style.audio_volume.is_some() {
+        bail!("audio_style.audio_volume is no longer supported; use audio_style.narration_volume");
+    }
+    if !style.narration_volume.is_finite() || style.narration_volume < 0.0 {
+        bail!("audio_style.narration_volume must be non-negative");
+    }
+    Ok(())
+}
+
+fn validate_pipeline_spec(pipeline: &PipelineSpec) -> Result<()> {
+    if pipeline.audio_file.is_some() {
+        bail!("pipeline.audio_file is no longer supported; use pipeline.narration_files");
+    }
+    if pipeline.narration_files.is_empty() {
+        bail!("pipeline.narration_files must contain at least one narration file");
+    }
+    Ok(())
+}
+
+fn validate_pipeline_narration_count(
+    narration_files: &[String],
+    subtitles: &[SimpleSubtitleCue],
+) -> Result<()> {
+    if narration_files.len() != subtitles.len() {
+        bail!(
+            "pipeline.narration_files length ({}) must match subtitle cue count ({})",
+            narration_files.len(),
+            subtitles.len()
+        );
+    }
+    Ok(())
+}
+
 fn is_normalized_position(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }
@@ -1015,6 +1301,23 @@ fn resolve_simple_asset_path(
     Ok(path)
 }
 
+fn resolve_pipeline_asset_path(
+    label: &str,
+    relative: &str,
+    bundle_root: &Utf8Path,
+    assets_dir: Option<&str>,
+) -> Result<Utf8PathBuf> {
+    validate_simple_relative_path(label, relative)?;
+    let assets_dir = assets_dir.unwrap_or("assets");
+    validate_simple_relative_path("assets_dir", assets_dir)?;
+
+    let path = bundle_root.join(assets_dir).join(relative);
+    if !path.is_file() {
+        bail!("{label} not found: {relative}");
+    }
+    Ok(path)
+}
+
 fn validate_simple_relative_path(label: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{label} must not be empty");
@@ -1033,6 +1336,128 @@ fn validate_simple_relative_path(label: &str, value: &str) -> Result<()> {
         bail!("{label} contains an invalid path segment");
     }
     Ok(())
+}
+
+fn parse_concat_file(path: &Utf8Path) -> Result<Vec<String>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read concat file: {path}"))?;
+    let mut files = Vec::new();
+    for (line_index, raw_line) in content.lines().enumerate() {
+        let line_no = line_index + 1;
+        let line = raw_line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("file ") else {
+            bail!("concat line {line_no} only supports file entries");
+        };
+        let relative = parse_concat_file_value(rest)
+            .with_context(|| format!("invalid concat line {line_no}"))?;
+        validate_simple_relative_path(&format!("concat line {line_no} path"), &relative)?;
+        files.push(relative);
+    }
+
+    if files.is_empty() {
+        bail!("concat file must contain at least one file entry");
+    }
+    Ok(files)
+}
+
+fn parse_concat_file_value(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        return Ok(value[1..value.len() - 1].to_string());
+    }
+    bail!("concat file entry must use single quotes");
+}
+
+fn parse_srt_file(path: &Utf8Path) -> Result<Vec<SimpleSubtitleCue>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read subtitle file: {path}"))?;
+    parse_srt_content(&content)
+}
+
+fn parse_srt_content(content: &str) -> Result<Vec<SimpleSubtitleCue>> {
+    let normalized = content
+        .trim_start_matches('\u{feff}')
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let mut cues = Vec::new();
+
+    for (block_index, block) in normalized.split("\n\n").enumerate() {
+        let lines = block
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            continue;
+        }
+
+        let time_line_index = if lines[0].contains("-->") { 0 } else { 1 };
+        if time_line_index >= lines.len() {
+            bail!("srt block {} is missing time range", block_index + 1);
+        }
+        let text_start_index = time_line_index + 1;
+        if text_start_index >= lines.len() {
+            bail!("srt block {} is missing text", block_index + 1);
+        }
+
+        let (start, end) = parse_srt_time_range(lines[time_line_index])
+            .with_context(|| format!("invalid srt block {} time range", block_index + 1))?;
+        if end <= start {
+            bail!(
+                "srt block {} end must be greater than start",
+                block_index + 1
+            );
+        }
+
+        let text = lines[text_start_index..].join("\n");
+        cues.push(SimpleSubtitleCue { start, end, text });
+    }
+
+    if cues.is_empty() {
+        bail!("srt file must contain at least one subtitle cue");
+    }
+    Ok(cues)
+}
+
+fn parse_srt_time_range(line: &str) -> Result<(f64, f64)> {
+    let Some((start, end)) = line.split_once("-->") else {
+        bail!("srt time range must contain -->");
+    };
+    Ok((parse_srt_time(start.trim())?, parse_srt_time(end.trim())?))
+}
+
+fn parse_srt_time(value: &str) -> Result<f64> {
+    let Some((hour_text, rest)) = value.split_once(':') else {
+        bail!("invalid srt time: {value}");
+    };
+    let Some((minute_text, rest)) = rest.split_once(':') else {
+        bail!("invalid srt time: {value}");
+    };
+    let Some((second_text, millis_text)) = rest.split_once(',').or_else(|| rest.split_once('.'))
+    else {
+        bail!("invalid srt time: {value}");
+    };
+
+    let hours = hour_text
+        .parse::<u64>()
+        .with_context(|| format!("invalid srt hour: {value}"))?;
+    let minutes = minute_text
+        .parse::<u64>()
+        .with_context(|| format!("invalid srt minute: {value}"))?;
+    let seconds = second_text
+        .parse::<u64>()
+        .with_context(|| format!("invalid srt second: {value}"))?;
+    let millis = millis_text
+        .parse::<u64>()
+        .with_context(|| format!("invalid srt millis: {value}"))?;
+    if minutes >= 60 || seconds >= 60 || millis >= 1000 {
+        bail!("invalid srt time component: {value}");
+    }
+
+    Ok((hours * 3600 + minutes * 60 + seconds) as f64 + millis as f64 / 1000.0)
 }
 
 fn resolve_draft_binding<F>(
@@ -1905,6 +2330,368 @@ mod tests {
     }
 
     #[test]
+    fn import_pipeline_package_generates_draft() -> Result<()> {
+        let temp = tempdir()?;
+        let bundle_dir = Utf8PathBuf::from_path_buf(temp.path().join("pipeline_bundle")).unwrap();
+        let assets_dir = bundle_dir.join("assets");
+        fs::create_dir_all(&assets_dir)?;
+
+        let first_video = assets_dir.join("video_001.mp4");
+        let second_video = assets_dir.join("video_002.mp4");
+        let narration_dir = assets_dir.join("narration");
+        fs::create_dir_all(&narration_dir)?;
+        let first_narration = narration_dir.join("001.wav");
+        let second_narration = narration_dir.join("002.wav");
+        if !write_test_mp4(&first_video)?
+            || !write_test_mp4(&second_video)?
+            || !write_test_wav(&first_narration, 1)?
+            || !write_test_wav(&second_narration, 1)?
+        {
+            return Ok(());
+        }
+
+        fs::write(
+            assets_dir.join("concat.txt"),
+            "file 'video_001.mp4'\nfile 'video_002.mp4'\n",
+        )?;
+        fs::write(
+            assets_dir.join("subtitle.srt"),
+            "1\n00:00:00,000 --> 00:00:00,400\n第一句字幕\n\n2\n00:00:00,500 --> 00:00:02,000\n第二句字幕\n",
+        )?;
+        fs::write(
+            bundle_dir.join("bundle.json"),
+            serde_json::to_string_pretty(&json!({
+                "bundle_version": 1,
+                "bundle_type": "pipeline_package",
+                "project_id": "proj_pipeline",
+                "project_name": "Pipeline Bundle",
+                "assets_dir": "assets",
+                "pipeline": {
+                    "concat_file": "concat.txt",
+                    "subtitle_file": "subtitle.srt",
+                    "narration_files": [
+                        "narration/001.wav",
+                        "narration/002.wav"
+                    ]
+                },
+                "subtitle_style": { "font_size": 9.0, "x": 0.5, "y": 0.82 },
+                "audio_style": { "video_volume": 1.0, "narration_volume": 0.8 }
+            }))?,
+        )?;
+
+        let summary = import_bundle(&ImportBundleOptions {
+            source: bundle_dir,
+            output: Utf8PathBuf::from_path_buf(temp.path().join("pipeline_draft")).unwrap(),
+            name_override: None,
+        })?;
+
+        assert_eq!(summary.bundle_type, "pipeline_package");
+        assert_eq!(summary.asset_count, 4);
+        assert_eq!(summary.track_count, 3);
+        assert_eq!(summary.video_material_count, 2);
+        assert_eq!(summary.audio_material_count, 2);
+
+        let draft: Value = serde_json::from_str(&fs::read_to_string(
+            Utf8PathBuf::from(summary.draft_dir.as_str()).join("draft_content.json"),
+        )?)?;
+        assert_eq!(draft["materials"]["audios"].as_array().unwrap().len(), 2);
+        assert_eq!(draft["materials"]["texts"].as_array().unwrap().len(), 2);
+
+        let tracks = draft["tracks"].as_array().unwrap();
+        assert!(tracks
+            .iter()
+            .any(|track| track["name"].as_str() == Some("main_video")));
+        let audio_track = tracks
+            .iter()
+            .find(|track| track["name"].as_str() == Some("audio"))
+            .expect("audio track exists");
+        let audio_segments = audio_track["segments"].as_array().unwrap();
+        assert_eq!(audio_segments.len(), 2);
+        assert_eq!(audio_segments[0]["volume"].as_f64(), Some(0.8));
+        assert_eq!(
+            audio_segments[0]["target_timerange"]["start"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(
+            audio_segments[0]["target_timerange"]["duration"].as_u64(),
+            Some(400_000)
+        );
+        assert_eq!(
+            audio_segments[1]["target_timerange"]["start"].as_u64(),
+            Some(500_000)
+        );
+        assert_eq!(
+            audio_segments[1]["target_timerange"]["duration"].as_u64(),
+            Some(1_000_000)
+        );
+        assert!(tracks
+            .iter()
+            .any(|track| track["name"].as_str() == Some("subtitle")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_concat_file_rejects_unsupported_lines() -> Result<()> {
+        let temp = tempdir()?;
+        let concat = Utf8PathBuf::from_path_buf(temp.path().join("concat.txt")).unwrap();
+
+        fs::write(&concat, "")?;
+        assert!(format!("{:#}", parse_concat_file(&concat).unwrap_err())
+            .contains("at least one file entry"));
+
+        fs::write(&concat, "duration 1\n")?;
+        assert!(format!("{:#}", parse_concat_file(&concat).unwrap_err())
+            .contains("only supports file entries"));
+
+        fs::write(&concat, "file 'C:/assets/video.mp4'\n")?;
+        assert!(
+            format!("{:#}", parse_concat_file(&concat).unwrap_err()).contains("must be relative")
+        );
+
+        fs::write(&concat, "file '../video.mp4'\n")?;
+        assert!(format!("{:#}", parse_concat_file(&concat).unwrap_err())
+            .contains("invalid path segment"));
+
+        fs::write(&concat, "file 'dir\\video.mp4'\n")?;
+        assert!(format!("{:#}", parse_concat_file(&concat).unwrap_err()).contains("path separator"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_srt_content_validates_time_ranges() -> Result<()> {
+        let cues = parse_srt_content("1\n00:00:00,000 --> 00:00:01,200\n第一行\n第二行\n")?;
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "第一行\n第二行");
+        assert_eq!(cues[0].start, 0.0);
+        assert_eq!(cues[0].end, 1.2);
+
+        let invalid_time = parse_srt_content("1\nbad --> 00:00:01,000\nbad\n").unwrap_err();
+        assert!(format!("{invalid_time:#}").contains("invalid srt"));
+
+        let invalid_range =
+            parse_srt_content("1\n00:00:01,000 --> 00:00:01,000\nbad\n").unwrap_err();
+        assert!(format!("{invalid_range:#}").contains("end must be greater than start"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_package_rejects_subtitle_overflow() -> Result<()> {
+        let temp = tempdir()?;
+        let bundle_dir = Utf8PathBuf::from_path_buf(temp.path().join("pipeline_bundle")).unwrap();
+        let assets_dir = bundle_dir.join("assets");
+        fs::create_dir_all(&assets_dir)?;
+
+        let video = assets_dir.join("video_001.mp4");
+        let narration = assets_dir.join("001.wav");
+        if !write_test_mp4(&video)? || !write_test_wav(&narration, 1)? {
+            return Ok(());
+        }
+
+        fs::write(assets_dir.join("concat.txt"), "file 'video_001.mp4'\n")?;
+        fs::write(
+            assets_dir.join("subtitle.srt"),
+            "1\n00:00:00,000 --> 00:00:02,000\n超出视频\n",
+        )?;
+        fs::write(
+            bundle_dir.join("bundle.json"),
+            serde_json::to_string_pretty(&json!({
+                "bundle_version": 1,
+                "bundle_type": "pipeline_package",
+                "project_name": "Overflow Pipeline Bundle",
+                "assets_dir": "assets",
+                "pipeline": {
+                    "concat_file": "concat.txt",
+                    "subtitle_file": "subtitle.srt",
+                    "narration_files": ["001.wav"]
+                }
+            }))?,
+        )?;
+
+        let error = import_bundle(&ImportBundleOptions {
+            source: bundle_dir,
+            output: Utf8PathBuf::from_path_buf(temp.path().join("draft")).unwrap(),
+            name_override: None,
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("end exceeds stitched video duration"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_package_rejects_non_audio_file() -> Result<()> {
+        let temp = tempdir()?;
+        let bundle_dir = Utf8PathBuf::from_path_buf(temp.path().join("pipeline_bundle")).unwrap();
+        let assets_dir = bundle_dir.join("assets");
+        fs::create_dir_all(&assets_dir)?;
+
+        let video = assets_dir.join("video_001.mp4");
+        if !write_test_mp4(&video)? {
+            return Ok(());
+        }
+
+        fs::write(assets_dir.join("concat.txt"), "file 'video_001.mp4'\n")?;
+        fs::write(
+            assets_dir.join("subtitle.srt"),
+            "1\n00:00:00,000 --> 00:00:00,400\n字幕\n",
+        )?;
+        fs::write(
+            bundle_dir.join("bundle.json"),
+            serde_json::to_string_pretty(&json!({
+                "bundle_version": 1,
+                "bundle_type": "pipeline_package",
+                "project_name": "Invalid Audio Pipeline Bundle",
+                "assets_dir": "assets",
+                "pipeline": {
+                    "concat_file": "concat.txt",
+                    "subtitle_file": "subtitle.srt",
+                    "narration_files": ["video_001.mp4"]
+                }
+            }))?,
+        )?;
+
+        let error = import_bundle(&ImportBundleOptions {
+            source: bundle_dir,
+            output: Utf8PathBuf::from_path_buf(temp.path().join("draft")).unwrap(),
+            name_override: None,
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("failed to load pipeline narration[0]"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_package_rejects_deprecated_audio_file() -> Result<()> {
+        let temp = tempdir()?;
+        let bundle_dir = Utf8PathBuf::from_path_buf(temp.path().join("pipeline_bundle")).unwrap();
+        fs::create_dir_all(&bundle_dir)?;
+        fs::write(
+            bundle_dir.join("bundle.json"),
+            serde_json::to_string_pretty(&json!({
+                "bundle_version": 1,
+                "bundle_type": "pipeline_package",
+                "project_name": "Deprecated Audio File",
+                "assets_dir": "assets",
+                "pipeline": {
+                    "concat_file": "concat.txt",
+                    "audio_file": "audio.wav",
+                    "subtitle_file": "subtitle.srt"
+                }
+            }))?,
+        )?;
+
+        let error = import_bundle(&ImportBundleOptions {
+            source: bundle_dir,
+            output: Utf8PathBuf::from_path_buf(temp.path().join("draft")).unwrap(),
+            name_override: None,
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("pipeline.audio_file is no longer supported"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_package_rejects_missing_narration_files() -> Result<()> {
+        let temp = tempdir()?;
+        let bundle_dir = Utf8PathBuf::from_path_buf(temp.path().join("pipeline_bundle")).unwrap();
+        fs::create_dir_all(&bundle_dir)?;
+        fs::write(
+            bundle_dir.join("bundle.json"),
+            serde_json::to_string_pretty(&json!({
+                "bundle_version": 1,
+                "bundle_type": "pipeline_package",
+                "project_name": "Missing Narration Files",
+                "assets_dir": "assets",
+                "pipeline": {
+                    "concat_file": "concat.txt",
+                    "subtitle_file": "subtitle.srt"
+                }
+            }))?,
+        )?;
+
+        let error = import_bundle(&ImportBundleOptions {
+            source: bundle_dir,
+            output: Utf8PathBuf::from_path_buf(temp.path().join("draft")).unwrap(),
+            name_override: None,
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("narration_files must contain at least one"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_package_rejects_deprecated_audio_volume() -> Result<()> {
+        let manifest: BundleManifest = serde_json::from_value(json!({
+            "bundle_version": 1,
+            "bundle_type": "pipeline_package",
+            "project_name": "Deprecated Audio Volume",
+            "pipeline": {
+                "concat_file": "concat.txt",
+                "subtitle_file": "subtitle.srt",
+                "narration_files": ["001.wav"]
+            },
+            "audio_style": {
+                "audio_volume": 0.8
+            }
+        }))?;
+
+        let error = validate_pipeline_audio_style(&manifest.audio_style).unwrap_err();
+        assert!(format!("{error:#}").contains("audio_style.audio_volume is no longer supported"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_package_rejects_narration_count_mismatch() -> Result<()> {
+        let temp = tempdir()?;
+        let bundle_dir = Utf8PathBuf::from_path_buf(temp.path().join("pipeline_bundle")).unwrap();
+        let assets_dir = bundle_dir.join("assets");
+        fs::create_dir_all(&assets_dir)?;
+
+        let video = assets_dir.join("video_001.mp4");
+        let narration = assets_dir.join("001.wav");
+        if !write_test_mp4(&video)? || !write_test_wav(&narration, 1)? {
+            return Ok(());
+        }
+
+        fs::write(assets_dir.join("concat.txt"), "file 'video_001.mp4'\n")?;
+        fs::write(
+            assets_dir.join("subtitle.srt"),
+            "1\n00:00:00,000 --> 00:00:00,400\n第一句\n\n2\n00:00:00,500 --> 00:00:00,900\n第二句\n",
+        )?;
+        fs::write(
+            bundle_dir.join("bundle.json"),
+            serde_json::to_string_pretty(&json!({
+                "bundle_version": 1,
+                "bundle_type": "pipeline_package",
+                "project_name": "Mismatch Pipeline Bundle",
+                "assets_dir": "assets",
+                "pipeline": {
+                    "concat_file": "concat.txt",
+                    "subtitle_file": "subtitle.srt",
+                    "narration_files": ["001.wav"]
+                }
+            }))?,
+        )?;
+
+        let error = import_bundle(&ImportBundleOptions {
+            source: bundle_dir,
+            output: Utf8PathBuf::from_path_buf(temp.path().join("draft")).unwrap(),
+            name_override: None,
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("must match subtitle cue count"));
+
+        Ok(())
+    }
+
+    #[test]
     fn import_draft_package_rewrites_material_paths() -> Result<()> {
         let temp = tempdir()?;
         let bundle_dir = Utf8PathBuf::from_path_buf(temp.path().join("bundle")).unwrap();
@@ -2004,6 +2791,33 @@ mod tests {
                 "color=c=black:s=16x16:d=1",
                 "-pix_fmt",
                 "yuv420p",
+                path.as_str(),
+            ])
+            .status();
+
+        match status {
+            Ok(status) => Ok(status.success()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn write_test_wav(path: &Utf8Path, duration_seconds: u64) -> Result<bool> {
+        let duration = duration_seconds.to_string();
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=44100",
+                "-t",
+                duration.as_str(),
+                "-c:a",
+                "pcm_s16le",
                 path.as_str(),
             ])
             .status();
