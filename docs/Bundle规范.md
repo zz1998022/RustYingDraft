@@ -298,24 +298,31 @@ package_root/
 
 ## 8. `pipeline_package`
 
-该模式用于后端已有 ffmpeg 流水线产物的场景。草稿工具不执行 ffmpeg，只读取 `concat.txt`、分段解说音频和 SRT 字幕文件，生成剪映可编辑草稿。
+该模式用于后端已有 ffmpeg 流水线产物的场景。草稿工具不执行 ffmpeg，只读取后端产出的本地素材、SRT 字幕和时间线描述，生成剪映可编辑草稿。
 
-目录：
+生产新接入推荐使用 `pipeline.tracks` 多轨模式。旧版 `concat_file + subtitle_file + narration_files` 单轨模式继续兼容，但不能和 `pipeline.tracks` 混用。
+
+多轨目录示例：
 
 ```text
 package_root/
   bundle.json
   assets/
-    concat.txt
-    video_001.mp4
-    video_002.mp4
-    subtitle.srt
+    video/
+      main_001.mp4
+      main_002.mp4
+      overlay_001.mp4
+    audio/
+      bgm.mp3
     narration/
       001.mp3
       002.mp3
+    subtitle/
+      cn.srt
+      comment.srt
 ```
 
-`bundle.json` 示例：
+多轨 `bundle.json` 示例：
 
 ```json
 {
@@ -325,6 +332,94 @@ package_root/
   "project_name": "批量草稿_001",
   "assets_dir": "assets",
   "pipeline": {
+    "tracks": [
+      {
+        "kind": "video",
+        "name": "main_video",
+        "clips": [
+          { "path": "video/main_001.mp4", "start": 0.0 },
+          { "path": "video/main_002.mp4", "start": 12.5 }
+        ]
+      },
+      {
+        "kind": "video",
+        "name": "overlay_video",
+        "clips": [
+          { "path": "video/overlay_001.mp4", "start": 3.0, "volume": 0.0 }
+        ]
+      },
+      {
+        "kind": "audio",
+        "name": "narration",
+        "clips": [
+          { "path": "narration/001.mp3", "start": 0.0, "end": 2.4 },
+          { "path": "narration/002.mp3", "start": 2.4, "end": 5.1 }
+        ]
+      },
+      {
+        "kind": "audio",
+        "name": "bgm",
+        "clips": [
+          { "path": "audio/bgm.mp3", "start": 0.0, "end": 30.0, "volume": 0.35 }
+        ]
+      },
+      {
+        "kind": "text",
+        "name": "subtitle_cn",
+        "subtitle_file": "subtitle/cn.srt",
+        "style": { "font_size": 8.0, "x": 0.5, "y": 0.82 }
+      },
+      {
+        "kind": "text",
+        "name": "subtitle_comment",
+        "subtitle_file": "subtitle/comment.srt",
+        "style": { "font_size": 6.0, "x": 0.5, "y": 0.72 }
+      }
+    ]
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `pipeline.tracks` | `array` | 新模式必填 | 轨道列表 |
+| `pipeline.tracks[].kind` | `string` | 是 | `video`、`audio` 或 `text` |
+| `pipeline.tracks[].name` | `string` | 是 | 轨道名，必须唯一 |
+| `pipeline.tracks[].clips[].path` | `string` | video/audio 必填 | 相对 `assets_dir` 的素材路径 |
+| `pipeline.tracks[].clips[].start` | `number` | video/audio 必填 | 片段在时间线上的开始秒数 |
+| `pipeline.tracks[].clips[].end` | `number` | audio 必填 | 音频片段结束秒数，视频第一版不支持 `end` |
+| `pipeline.tracks[].clips[].volume` | `number` | 否 | 音量，默认 `1.0` |
+| `pipeline.tracks[].subtitle_file` | `string` | text 必填 | 相对 `assets_dir` 的 SRT 字幕文件 |
+| `pipeline.tracks[].style.font_size` | `number` | 否 | 字幕字号，默认继承全局 `subtitle_style` |
+| `pipeline.tracks[].style.x` | `number` | 否 | 字幕归一化横坐标 |
+| `pipeline.tracks[].style.y` | `number` | 否 | 字幕归一化纵坐标 |
+
+导入结果：
+
+- 每个 `video` 轨生成一条剪映视频轨，视频整段放到 `start`
+- 每个 `audio` 轨生成一条剪映音频轨，真实播放时长为 `min(音频真实时长, end-start)`
+- 每个 `text` 轨从一个 SRT 文件生成一条剪映文本轨
+- 同轨片段不能重叠，不同轨道之间允许重叠
+- 同类型轨道按声明顺序递增层级，后声明的视频轨显示层级更高
+
+校验规则：
+
+- `pipeline.tracks` 不能和 `concat_file`、`subtitle_file`、`narration_files` 混用
+- 至少包含一个视频片段
+- 轨道名必须唯一
+- 视频片段第一版只支持整段素材，不能传 `end`
+- 音频片段必须 `end > start`
+- 字幕结束时间不能超过所有视频轨的最大结束时间
+- 所有路径都相对 `assets_dir`，不能是绝对路径，不能包含 `..`，不能使用 Windows 反斜杠
+- 第一版不支持视频裁剪、转场、贴纸、淡入淡出、逐条字幕样式
+
+旧版单轨模式继续支持：
+
+```json
+{
+  "pipeline": {
     "concat_file": "concat.txt",
     "subtitle_file": "subtitle.srt",
     "narration_files": [
@@ -332,45 +427,12 @@ package_root/
       "narration/002.mp3"
     ]
   },
-  "subtitle_style": {
-    "font_size": 8.0,
-    "x": 0.5,
-    "y": 0.82
-  },
-  "audio_style": {
-    "video_volume": 1.0,
-    "narration_volume": 1.0
-  }
+  "subtitle_style": { "font_size": 8.0, "x": 0.5, "y": 0.82 },
+  "audio_style": { "video_volume": 1.0, "narration_volume": 1.0 }
 }
 ```
 
-`concat.txt` 只支持 ffmpeg concat demuxer 的 `file` 子集：
-
-```text
-file 'video_001.mp4'
-file 'video_002.mp4'
-```
-
-字段说明：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `pipeline.concat_file` | `string` | 是 | 相对 `assets_dir` 的 concat 文件 |
-| `pipeline.subtitle_file` | `string` | 是 | 相对 `assets_dir` 的 SRT 字幕文件 |
-| `pipeline.narration_files` | `array` | 是 | 相对 `assets_dir` 的分段解说音频列表，顺序对应 SRT 字幕 |
-| `subtitle_style.font_size` | `number` | 否 | 字幕字号，默认 `8.0` |
-| `subtitle_style.x` | `number` | 否 | 字幕归一化横坐标，默认 `0.5` |
-| `subtitle_style.y` | `number` | 否 | 字幕归一化纵坐标，默认 `0.82` |
-| `audio_style.video_volume` | `number` | 否 | 视频原声音量，默认 `1.0` |
-| `audio_style.narration_volume` | `number` | 否 | 解说音频音量，默认 `1.0` |
-
-导入结果：
-
-- `main_video` 视频轨：按 `concat.txt` 顺序整段拼接视频
-- `audio` 音频轨：第 N 个解说音频按第 N 条 SRT 字幕的开始时间放置，长于字幕时裁剪，短于字幕时不补齐
-- `subtitle` 字幕轨：SRT 字幕导入为可编辑文本
-
-校验规则：
+旧版规则：
 
 - `concat.txt` 至少包含一个 `file '...'` 条目
 - `narration_files` 不能为空，数量必须等于 SRT 字幕条数
@@ -378,7 +440,6 @@ file 'video_002.mp4'
 - SRT 每条字幕必须 `end > start`
 - 字幕结束时间不能超过拼接后的视频总时长
 - `pipeline.audio_file` 和 `audio_style.audio_volume` 已废弃，传入时报错
-- 第一版不支持裁剪、空隙、转场、贴纸、多音轨、多字幕样式
 
 ## 9. 后端出包流程
 
