@@ -26,8 +26,9 @@ case "$(uname -s)" in
     archive="ffprobe.zip"
     ;;
   Linux)
-    url="https://johnvansickle.com/ffmpeg/releases/ffmpeg-7.0.2-amd64-static.tar.xz"
-    expected_sha256="4f231a1960d83e403d08f7971e271707bec278a9ae18e21b8b5b03186668450d"
+    # 用 BtbN 的 GPL 静态构建（GitHub CDN，CI 不会像 johnvansickle 那样拦截数据中心 IP）。
+    url="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-08-14-24/ffmpeg-n8.1.1-11-ge4c7fbf6c0-linux64-gpl-8.1.tar.xz"
+    expected_sha256="bae7f38fe5dda21c35c168175795294eaa1005c36addcecee4b9b42c89d09e99"
     archive="ffmpeg.tar.xz"
     ;;
   *)

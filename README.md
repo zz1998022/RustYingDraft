@@ -379,6 +379,6 @@ cargo run -p jy_cli -- --output-format json generate --project ./project.json --
 |------|------|------------|--------------------------|
 | Windows x64 | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) essentials | 8.1.1 | `0fde260f5abd35c9cafd96f594cc76365a780c1b73a90e35b6a3409ea1db1bf0` |
 | macOS x64 | [evermeet.cx](https://evermeet.cx/ffmpeg/) | 8.1.1 | `a976306bcb8c9c50b2ac4e91f5aac4e45395e1f9063c46aecf1e1213e41c631b` |
-| Linux x64 | [johnvansickle.com](https://johnvansickle.com/ffmpeg/) amd64-static | 7.0.2 | `4f231a1960d83e403d08f7971e271707bec278a9ae18e21b8b5b03186668450d` |
+| Linux x64 | [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) linux64-gpl | 8.1.1 | `bae7f38fe5dda21c35c168175795294eaa1005c36addcecee4b9b42c89d09e99` |
 
 升级版本时，需同步更新脚本里的固定 URL 与期望 SHA256。
