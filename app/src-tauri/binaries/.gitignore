@@ -1,0 +1,4 @@
+# 随包 ffprobe 体积大且涉及第三方许可证，不纳入版本库。
+# 本地开发或 CI 构建前请先运行 scripts/fetch-ffprobe.{sh,ps1} 生成。
+*
+!.gitignore

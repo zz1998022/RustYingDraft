@@ -21,6 +21,22 @@ pub struct MediaInfo {
     pub sample_rate: Option<u32>,
 }
 
+/// 解析 ffprobe 可执行文件位置。
+///
+/// 优先使用 `JY_FFPROBE_PATH`（桌面端会指向随包二进制），否则回退到 PATH 上的 `ffprobe`。
+/// 这样做的原因：macOS GUI 进程不继承用户 shell 的 PATH，且客户机器未必装过 ffmpeg，
+/// 桌面端需要显式指向自带的 ffprobe，而服务端 CLI 仍可走 PATH 保持原有行为。
+fn ffprobe_program() -> std::ffi::OsString {
+    resolve_ffprobe_program(std::env::var_os("JY_FFPROBE_PATH"))
+}
+
+fn resolve_ffprobe_program(override_path: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    match override_path {
+        Some(path) if !path.is_empty() => path,
+        _ => std::ffi::OsString::from("ffprobe"),
+    }
+}
+
 // `ffprobe` 输出 JSON 的最小映射结构，只保留当前需要的字段。
 #[derive(Deserialize)]
 struct FfprobeOutput {
@@ -59,7 +75,7 @@ impl MediaInfo {
             });
         }
 
-        let output = Command::new("ffprobe")
+        let output = Command::new(ffprobe_program())
             .args([
                 "-print_format",
                 "json",
@@ -190,5 +206,33 @@ impl MediaInfo {
                 path: path.to_string(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_ffprobe_program;
+    use std::ffi::OsString;
+
+    #[test]
+    fn falls_back_to_path_ffprobe_when_unset() {
+        assert_eq!(resolve_ffprobe_program(None), OsString::from("ffprobe"));
+    }
+
+    #[test]
+    fn falls_back_to_path_ffprobe_when_empty() {
+        assert_eq!(
+            resolve_ffprobe_program(Some(OsString::new())),
+            OsString::from("ffprobe")
+        );
+    }
+
+    #[test]
+    fn prefers_explicit_override() {
+        let custom = OsString::from("/opt/yingdraft/ffprobe");
+        assert_eq!(
+            resolve_ffprobe_program(Some(custom.clone())),
+            custom
+        );
     }
 }

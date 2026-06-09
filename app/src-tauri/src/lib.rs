@@ -237,7 +237,37 @@ fn home_dir() -> Option<std::path::PathBuf> {
         })
 }
 
+/// 桌面端启动时把随包 ffprobe 的绝对路径注入 `JY_FFPROBE_PATH`。
+///
+/// macOS GUI 进程不继承用户 shell 的 PATH，客户机器也未必装过 ffmpeg，
+/// 因此优先指向安装包里自带的 ffprobe（Tauri externalBin 会放在主程序同目录）。
+/// 若用户已显式设置该变量，或找不到随包二进制，则保持原状回退到 PATH。
+fn configure_bundled_ffprobe() {
+    if std::env::var_os("JY_FFPROBE_PATH").is_some() {
+        return;
+    }
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(dir) = exe.parent() else {
+        return;
+    };
+
+    let binary = if cfg!(target_os = "windows") {
+        "ffprobe.exe"
+    } else {
+        "ffprobe"
+    };
+    let candidate = dir.join(binary);
+    if candidate.exists() {
+        std::env::set_var("JY_FFPROBE_PATH", candidate);
+    }
+}
+
 pub fn run() {
+    configure_bundled_ffprobe();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![

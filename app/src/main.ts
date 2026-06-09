@@ -303,7 +303,7 @@ function toUserMessage(error: unknown): string {
     return "SRT 字幕时间超过了拼接后视频总时长，请检查 subtitle.srt 的结束时间。";
   }
   if (/ffprobe/i.test(raw)) {
-    return `读取媒体时长失败，请确认本机已安装 ffmpeg/ffprobe 并能在命令行直接运行。原始错误：${raw}`;
+    return `读取媒体信息失败，导入插件自带的媒体探测组件缺失或无法运行。请重新安装最新版导入插件后重试，仍不行请联系支持。原始错误：${raw}`;
   }
   if (/failed to inspect directory/i.test(raw) || /No such file or directory/i.test(raw)) {
     return "这个项目目录读不了，请确认选择的是下载好的草稿目录。";

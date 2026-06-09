@@ -20,10 +20,10 @@ jobs:
             artifact_name: yingdraft-companion-windows-x64
           - runner: ubuntu-22.04
             artifact_name: yingdraft-companion-linux-x64
+          # 仅发 Intel 包：Apple Silicon 用户通过 Rosetta 运行，
+          # 规避未签名 arm64 二进制被系统拒绝执行的问题。
           - runner: macos-15-intel
             artifact_name: yingdraft-companion-macos-x64
-          - runner: macos-15
-            artifact_name: yingdraft-companion-macos-arm64
 
     steps:
       - name: Checkout
@@ -61,6 +61,16 @@ jobs:
           # Avoid restoring build-script binaries produced on a newer glibc runner.
           # Ubuntu 22.04 is kept intentionally for wider Linux compatibility.
           rm -rf target/release/build target/release/deps target/release/.fingerprint target/release/incremental
+
+      - name: Fetch bundled ffprobe
+        shell: bash
+        run: |
+          # 把随包 ffprobe 下载到 app/src-tauri/binaries/，Tauri externalBin 需要它在构建期存在。
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            pwsh scripts/fetch-ffprobe.ps1
+          else
+            bash scripts/fetch-ffprobe.sh
+          fi
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -176,8 +186,8 @@ jobs:
           find release-assets -name "yingdraft-companion-*.tar.gz" -type f -exec cp {} release-upload/ \;
           ls -lh release-upload
           count="$(find release-upload -name "yingdraft-companion-*.tar.gz" -type f | wc -l | tr -d ' ')"
-          if [[ "$count" -ne 4 ]]; then
-            echo "预期 4 个桌面端发布包，实际找到 $count 个。" >&2
+          if [[ "$count" -ne 3 ]]; then
+            echo "预期 3 个桌面端发布包（Windows / Linux / macOS Intel），实际找到 $count 个。" >&2
             exit 1
           fi
 

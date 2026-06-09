@@ -272,17 +272,31 @@ cargo run -p jy_cli -- import-bundle `
 
 ### 启动桌面导入器
 
+桌面端会随包自带 `ffprobe`（通过 Tauri `externalBin`），因此最终用户无需自行安装 FFmpeg。
+构建或本地开发前，需要先把当前平台的 `ffprobe` 抓取到 `app/src-tauri/binaries/`：
+
+```powershell
+# Windows
+pwsh scripts/fetch-ffprobe.ps1
+# macOS / Linux
+bash scripts/fetch-ffprobe.sh
+```
+
+然后再启动：
+
 ```powershell
 cd app
 npm install
 npm run tauri dev
 ```
 
-Rust 侧也可以单独先检查：
+Rust 侧也可以单独先检查（同样需先抓取 ffprobe）：
 
 ```powershell
 cargo check -p yingdraft_companion
 ```
+
+> macOS 只发布 Intel 包，Apple Silicon 用户通过 Rosetta 运行，以规避未签名 arm64 二进制被系统拒绝执行的问题。
 
 ### 面向后端的 JSON 输出
 
@@ -353,13 +367,18 @@ cargo run -p jy_cli -- --output-format json generate --project ./project.json --
 - 接入你自己的后端
 - 作为桌面端或本地导入器的核心模块
 
-## 许可证状态
+## 许可证
 
-当前仓库**暂未附带开源许可证**。
+本仓库以 **GNU GPLv3 或更高版本**（`GPL-3.0-or-later`）开源，完整条款见根目录 [LICENSE](./LICENSE)。
 
-在许可证问题正式确认之前，请先将它视为：
+桌面端安装包会随包附带 `ffprobe`（来自 FFmpeg 的 GPL 静态构建），其源码可在对应上游构建站点获取。由于本项目本身即为 GPL，二者一并分发不存在许可冲突。
 
-- 暂不对外授权的代码仓库
-- 不建议直接按开源项目方式分发和复用
+随包 `ffprobe` 由 `scripts/fetch-ffprobe.{sh,ps1}` 在构建前下载，**固定版本并校验 SHA256**，保证 release 可复现、可控供应链。各平台来源如下：
 
-后续如果许可证策略明确，再补充正式 `LICENSE` 文件。
+| 平台 | 来源 | FFmpeg 版本 | SHA256（ffprobe 二进制）|
+|------|------|------------|--------------------------|
+| Windows x64 | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) essentials | 8.1.1 | `0fde260f5abd35c9cafd96f594cc76365a780c1b73a90e35b6a3409ea1db1bf0` |
+| macOS x64 | [evermeet.cx](https://evermeet.cx/ffmpeg/) | 8.1.1 | `a976306bcb8c9c50b2ac4e91f5aac4e45395e1f9063c46aecf1e1213e41c631b` |
+| Linux x64 | [johnvansickle.com](https://johnvansickle.com/ffmpeg/) amd64-static | 7.0.2 | `4f231a1960d83e403d08f7971e271707bec278a9ae18e21b8b5b03186668450d` |
+
+升级版本时，需同步更新脚本里的固定 URL 与期望 SHA256。
