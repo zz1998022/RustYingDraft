@@ -18,32 +18,15 @@ jobs:
         include:
           - runner: windows-latest
             artifact_name: yingdraft-companion-windows-x64
-          - runner: ubuntu-22.04
-            artifact_name: yingdraft-companion-linux-x64
-          # 仅发 Intel 包：Apple Silicon 用户通过 Rosetta 运行，
+          # 仅发 Windows + macOS Intel：Apple Silicon 用户通过 Rosetta 运行，
           # 规避未签名 arm64 二进制被系统拒绝执行的问题。
+          # Linux 桌面用户极少，不再打包以缩短构建时间（如有需要可后续单独提供）。
           - runner: macos-15-intel
             artifact_name: yingdraft-companion-macos-x64
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            file \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            pkg-config \
-            wget
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -54,13 +37,6 @@ jobs:
           shared-key: tauri-${{ matrix.artifact_name }}
           workspaces: |
             . -> target
-
-      - name: Drop incompatible Linux release cache
-        if: runner.os == 'Linux'
-        run: |
-          # Avoid restoring build-script binaries produced on a newer glibc runner.
-          # Ubuntu 22.04 is kept intentionally for wider Linux compatibility.
-          rm -rf target/release/build target/release/deps target/release/.fingerprint target/release/incremental
 
       - name: Fetch bundled ffprobe
         shell: bash
@@ -186,8 +162,8 @@ jobs:
           find release-assets -name "yingdraft-companion-*.tar.gz" -type f -exec cp {} release-upload/ \;
           ls -lh release-upload
           count="$(find release-upload -name "yingdraft-companion-*.tar.gz" -type f | wc -l | tr -d ' ')"
-          if [[ "$count" -ne 3 ]]; then
-            echo "预期 3 个桌面端发布包（Windows / Linux / macOS Intel），实际找到 $count 个。" >&2
+          if [[ "$count" -ne 2 ]]; then
+            echo "预期 2 个桌面端发布包（Windows / macOS Intel），实际找到 $count 个。" >&2
             exit 1
           fi
 
