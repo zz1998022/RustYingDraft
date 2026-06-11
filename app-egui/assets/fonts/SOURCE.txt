@@ -1,0 +1,7 @@
+Font: Noto Sans CJK SC Regular
+File: NotoSansCJKsc-Regular.otf
+Source: https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf
+License: SIL Open Font License 1.1
+License file: OFL.txt
+Font SHA256: 2C76254F6FC379FDDFCE0A7E84FB5385BB135D3E399294F6EEB6680D0365B74B
+License SHA256: 0DAB92D0544F7B233403F14B84A663BDBFA746982EDA629E7F4F9FFE1B036FEB

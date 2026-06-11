@@ -25,6 +25,18 @@ pub fn create_video_material(
 ) -> Result<VideoMaterialRef, MediaError> {
     let absolute_path = absolutize_path(path)?;
     let info = MediaInfo::from_path(&absolute_path)?;
+    create_video_material_from_info(&absolute_path, name, &info)
+}
+
+/// 使用已探测的媒体信息创建视频/图片素材引用。
+///
+/// 调用方已经拿到 `MediaInfo` 时使用这个函数，避免同一个素材在一次导入中被重复 ffprobe。
+pub fn create_video_material_from_info(
+    path: &Utf8Path,
+    name: Option<&str>,
+    info: &MediaInfo,
+) -> Result<VideoMaterialRef, MediaError> {
+    let absolute_path = absolutize_path(path)?;
     let material_name = name
         .map(|s| s.to_string())
         .or_else(|| absolute_path.file_name().map(|s| s.to_string()))
@@ -62,6 +74,16 @@ pub fn create_audio_material(
 ) -> Result<AudioMaterialRef, MediaError> {
     let absolute_path = absolutize_path(path)?;
     let info = MediaInfo::from_path(&absolute_path)?;
+    create_audio_material_from_info(&absolute_path, name, &info)
+}
+
+/// 使用已探测的媒体信息创建音频素材引用。
+pub fn create_audio_material_from_info(
+    path: &Utf8Path,
+    name: Option<&str>,
+    info: &MediaInfo,
+) -> Result<AudioMaterialRef, MediaError> {
+    let absolute_path = absolutize_path(path)?;
     let material_name = name
         .map(|s| s.to_string())
         .or_else(|| absolute_path.file_name().map(|s| s.to_string()))
@@ -81,4 +103,71 @@ pub fn create_audio_material(
         duration,
         name: material_name,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::probe::{MediaInfo, MediaKind};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_media_path(file_name: &str) -> Utf8PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("jy_media_material_test_{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        Utf8PathBuf::from_path_buf(dir.join(file_name)).unwrap()
+    }
+
+    #[test]
+    fn creates_video_material_from_declared_media_info_without_probe() {
+        let path = temp_media_path("clip.mp4");
+        fs::write(&path, b"not a real mp4").unwrap();
+
+        let material = create_video_material_from_info(
+            &path,
+            Some("clip"),
+            &MediaInfo {
+                kind: MediaKind::Video,
+                duration_us: Some(1_500_000),
+                width: Some(1920),
+                height: Some(1080),
+                sample_rate: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(material.path, path.canonicalize_utf8().unwrap());
+        assert_eq!(material.name, "clip");
+        assert_eq!(material.duration, 1_500_000);
+        assert_eq!(material.width, 1920);
+        assert_eq!(material.height, 1080);
+        assert_eq!(material.kind, MaterialKind::Video);
+    }
+
+    #[test]
+    fn creates_audio_material_from_declared_media_info_without_probe() {
+        let path = temp_media_path("narration.wav");
+        fs::write(&path, b"not a real wav").unwrap();
+
+        let material = create_audio_material_from_info(
+            &path,
+            None,
+            &MediaInfo {
+                kind: MediaKind::Audio,
+                duration_us: Some(900_000),
+                width: None,
+                height: None,
+                sample_rate: Some(44_100),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(material.path, path.canonicalize_utf8().unwrap());
+        assert_eq!(material.name, "narration.wav");
+        assert_eq!(material.duration, 900_000);
+    }
 }

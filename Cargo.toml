@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "app-egui",
     "crates/jy_schema",
     "crates/jy_media",
     "crates/jy_timeline",

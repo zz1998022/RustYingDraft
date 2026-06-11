@@ -2,17 +2,19 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Result};
 use jy_draft::writer::write_draft;
-use jy_media::material::{create_audio_material, create_video_material};
 use jy_schema::{Canvas, MaterialKind, TimeRange, TrackKind};
 use jy_timeline::builder::ProjectBuilder;
 use jy_timeline::clip::{make_audio_clip, make_text_clip, make_video_clip};
+use serde_json::json;
 
-use crate::api::{ImportBundleOptions, ImportBundleSummary};
+use crate::api::{ImportBundleOptions, ImportBundleProgress, ImportBundleSummary};
 use crate::fs_util::{ensure_output_dir_ready, resolve_pipeline_asset_path, seconds_to_micros};
 use crate::manifest::BundleManifest;
+use crate::media_cache::{MediaMaterialCache, MediaProbeRequest};
 use crate::pipeline::spec::{default_pipeline_volume, PipelineSpec, PipelineTrackKind};
 use crate::pipeline::srt::parse_srt_file;
 use crate::pipeline::{
+    emit_pipeline_progress, ensure_not_cancelled, progress_count_data,
     validate_pipeline_multitrack_spec, validate_text_tracks_within_video_duration,
 };
 use crate::source::PreparedSource;
@@ -23,12 +25,78 @@ pub(crate) fn import_pipeline_multitrack_package(
     prepared: &PreparedSource,
     bundle: &BundleManifest,
     pipeline: &PipelineSpec,
+    progress: &mut impl FnMut(ImportBundleProgress),
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<ImportBundleSummary> {
+    ensure_not_cancelled(is_cancelled)?;
     let tracks = pipeline
         .tracks
         .as_deref()
         .ok_or_else(|| anyhow!("pipeline.tracks is required"))?;
     validate_pipeline_multitrack_spec(tracks)?;
+    let media_clip_count = tracks
+        .iter()
+        .filter(|track| {
+            matches!(
+                track.kind,
+                PipelineTrackKind::Video | PipelineTrackKind::Audio
+            )
+        })
+        .map(|track| track.clips.len())
+        .sum::<usize>();
+    emit_pipeline_progress(
+        progress,
+        "pipeline_prepare",
+        "已读取 pipeline.tracks",
+        json!({
+            "track_count": tracks.len(),
+            "media_clip_count": media_clip_count,
+        }),
+    );
+
+    let mut probe_requests = Vec::with_capacity(media_clip_count);
+    for (track_index, track) in tracks.iter().enumerate() {
+        if !matches!(
+            track.kind,
+            PipelineTrackKind::Video | PipelineTrackKind::Audio
+        ) {
+            continue;
+        }
+        for (clip_index, clip) in track.clips.iter().enumerate() {
+            let material_path = resolve_pipeline_asset_path(
+                &format!("pipeline.tracks[{track_index}].clips[{clip_index}].path"),
+                &clip.path,
+                &prepared.bundle_root,
+                bundle.assets_dir.as_deref(),
+            )
+            .with_context(|| {
+                format!("invalid pipeline.tracks[{track_index}].clips[{clip_index}].path")
+            })?;
+            probe_requests.push(MediaProbeRequest {
+                path: material_path,
+                label: format!(
+                    "failed to load pipeline {} track '{}' clip[{clip_index}]: {}",
+                    track.kind.as_str(),
+                    track.name,
+                    clip.path
+                ),
+            });
+        }
+    }
+
+    let media_cache = MediaMaterialCache::preload(
+        probe_requests,
+        |current, total, request| {
+            emit_pipeline_progress(
+                progress,
+                "pipeline_probe",
+                format!("探测素材 {current}/{total}"),
+                progress_count_data(current, total, Some(request.path.as_str())),
+            );
+        },
+        is_cancelled,
+    )?;
+    ensure_not_cancelled(is_cancelled)?;
 
     let project_name = options
         .name_override
@@ -47,6 +115,7 @@ pub(crate) fn import_pipeline_multitrack_package(
     let mut asset_count = 0_usize;
 
     for (track_index, track) in tracks.iter().enumerate() {
+        ensure_not_cancelled(is_cancelled)?;
         match track.kind {
             PipelineTrackKind::Video => {
                 for (clip_index, clip) in track.clips.iter().enumerate() {
@@ -59,8 +128,9 @@ pub(crate) fn import_pipeline_multitrack_package(
                     .with_context(|| {
                         format!("invalid pipeline.tracks[{track_index}].clips[{clip_index}].path")
                     })?;
-                    let material =
-                        create_video_material(&material_path, None).with_context(|| {
+                    let material = media_cache
+                        .create_video_material(&material_path, None)
+                        .with_context(|| {
                             format!(
                                 "failed to load pipeline video track '{}' clip[{clip_index}]: {}",
                                 track.name, clip.path
@@ -125,8 +195,9 @@ pub(crate) fn import_pipeline_multitrack_package(
                     .with_context(|| {
                         format!("invalid pipeline.tracks[{track_index}].clips[{clip_index}].path")
                     })?;
-                    let audio_material =
-                        create_audio_material(&material_path, None).with_context(|| {
+                    let audio_material = media_cache
+                        .create_audio_material(&material_path, None)
+                        .with_context(|| {
                             format!(
                                 "failed to load pipeline audio track '{}' clip[{clip_index}]: {}",
                                 track.name, clip.path
@@ -209,6 +280,13 @@ pub(crate) fn import_pipeline_multitrack_package(
     validate_text_tracks_within_video_duration(&project)?;
     project.id = bundle.project_id.clone().unwrap_or(project.id);
 
+    ensure_not_cancelled(is_cancelled)?;
+    emit_pipeline_progress(
+        progress,
+        "pipeline_write",
+        "写入剪映草稿",
+        json!({ "output": options.output.as_str() }),
+    );
     ensure_output_dir_ready(&options.output)?;
     write_draft(&project, &options.output)?;
 

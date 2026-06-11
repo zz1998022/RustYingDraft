@@ -3,6 +3,7 @@ mod asset;
 mod draft_package;
 mod fs_util;
 mod manifest;
+mod media_cache;
 mod pipeline;
 mod simple_timeline_package;
 mod source;
@@ -25,10 +26,22 @@ pub fn import_bundle(options: &ImportBundleOptions) -> Result<ImportBundleSummar
 
 pub fn import_bundle_with_progress<F>(
     options: &ImportBundleOptions,
-    mut progress: F,
+    progress: F,
 ) -> Result<ImportBundleSummary>
 where
     F: FnMut(ImportBundleProgress),
+{
+    import_bundle_with_progress_and_cancel(options, progress, || false)
+}
+
+pub fn import_bundle_with_progress_and_cancel<F, C>(
+    options: &ImportBundleOptions,
+    mut progress: F,
+    is_cancelled: C,
+) -> Result<ImportBundleSummary>
+where
+    F: FnMut(ImportBundleProgress),
+    C: Fn() -> bool,
 {
     let prepared = PreparedSource::from_source(&options.source)?;
     let bundle = prepared.manifest()?;
@@ -42,9 +55,13 @@ where
         BundleType::SimpleTimelinePackage => {
             simple_timeline_package::import_simple_timeline_package(options, &prepared, &bundle)
         }
-        BundleType::PipelinePackage => {
-            pipeline::import_pipeline_package(options, &prepared, &bundle)
-        }
+        BundleType::PipelinePackage => pipeline::import_pipeline_package(
+            options,
+            &prepared,
+            &bundle,
+            &mut progress,
+            &is_cancelled,
+        ),
     }
 }
 

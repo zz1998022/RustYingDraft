@@ -9,8 +9,11 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Context, Result};
 use camino::Utf8Path;
 use jy_schema::TrackKind;
+use serde_json::{json, Value};
 
-use crate::api::{BundleInspection, ImportBundleOptions, ImportBundleSummary};
+use crate::api::{
+    BundleInspection, ImportBundleOptions, ImportBundleProgress, ImportBundleSummary,
+};
 use crate::fs_util::{resolve_pipeline_asset_path, validate_simple_relative_path};
 use crate::manifest::BundleManifest;
 use crate::source::PreparedSource;
@@ -25,6 +28,8 @@ pub(crate) fn import_pipeline_package(
     options: &ImportBundleOptions,
     prepared: &PreparedSource,
     bundle: &BundleManifest,
+    progress: &mut impl FnMut(ImportBundleProgress),
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<ImportBundleSummary> {
     let pipeline = bundle
         .pipeline
@@ -34,9 +39,23 @@ pub(crate) fn import_pipeline_package(
     validate_pipeline_audio_style(&bundle.audio_style)?;
     validate_pipeline_spec(pipeline)?;
     if pipeline.tracks.is_some() {
-        return multitrack::import_pipeline_multitrack_package(options, prepared, bundle, pipeline);
+        return multitrack::import_pipeline_multitrack_package(
+            options,
+            prepared,
+            bundle,
+            pipeline,
+            progress,
+            is_cancelled,
+        );
     }
-    legacy::import_pipeline_legacy_package(options, prepared, bundle, pipeline)
+    legacy::import_pipeline_legacy_package(
+        options,
+        prepared,
+        bundle,
+        pipeline,
+        progress,
+        is_cancelled,
+    )
 }
 
 pub(crate) fn inspect_pipeline_package(
@@ -328,11 +347,39 @@ pub(crate) fn validate_pipeline_narration_count(
     Ok(())
 }
 
+pub(crate) fn emit_pipeline_progress(
+    progress: &mut impl FnMut(ImportBundleProgress),
+    stage: &str,
+    message: impl Into<String>,
+    data: Value,
+) {
+    progress(ImportBundleProgress {
+        stage: stage.to_string(),
+        message: message.into(),
+        data,
+    });
+}
+
+pub(crate) fn ensure_not_cancelled(is_cancelled: &impl Fn() -> bool) -> Result<()> {
+    if is_cancelled() {
+        bail!("import cancelled");
+    }
+    Ok(())
+}
+
+pub(crate) fn progress_count_data(current: usize, total: usize, path: Option<&str>) -> Value {
+    json!({
+        "current": current,
+        "total": total,
+        "path": path,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{write_test_mp4, write_test_wav};
-    use crate::{import_bundle, ImportBundleOptions};
+    use crate::{import_bundle, import_bundle_with_progress, ImportBundleOptions};
     use camino::Utf8PathBuf;
     use serde_json::json;
     use std::fs;
@@ -450,11 +497,16 @@ mod tests {
             }))?,
         )?;
 
-        let summary = import_bundle(&ImportBundleOptions {
-            source: bundle_dir,
-            output: Utf8PathBuf::from_path_buf(temp.path().join("pipeline_multi_draft")).unwrap(),
-            name_override: None,
-        })?;
+        let mut progress_events = Vec::new();
+        let summary = import_bundle_with_progress(
+            &ImportBundleOptions {
+                source: bundle_dir,
+                output: Utf8PathBuf::from_path_buf(temp.path().join("pipeline_multi_draft"))
+                    .unwrap(),
+                name_override: None,
+            },
+            |event| progress_events.push(event),
+        )?;
 
         assert_eq!(summary.bundle_type, "pipeline_package");
         assert_eq!(summary.asset_count, 4);
@@ -469,6 +521,12 @@ mod tests {
         assert!(content.contains("overlay_video"));
         assert!(content.contains("subtitle_comment"));
         assert!(content.contains("评论字幕"));
+        assert!(progress_events
+            .iter()
+            .any(|event| event.stage == "pipeline_probe"));
+        assert!(progress_events
+            .iter()
+            .any(|event| event.stage == "pipeline_write"));
 
         Ok(())
     }
@@ -507,6 +565,49 @@ mod tests {
 
         let error = validate_pipeline_spec(manifest.pipeline.as_ref().unwrap()).unwrap_err();
         assert!(format!("{error:#}").contains("pipeline.audio_file is no longer supported"));
+        Ok(())
+    }
+
+    #[test]
+    fn pipeline_import_stops_before_progress_when_video_clip_has_end() -> Result<()> {
+        let temp = tempdir()?;
+        let bundle_dir = Utf8PathBuf::from_path_buf(temp.path().join("invalid_video_end")).unwrap();
+        fs::create_dir_all(bundle_dir.join("assets").join("video"))?;
+        fs::write(
+            bundle_dir.join("bundle.json"),
+            serde_json::to_string_pretty(&json!({
+                "bundle_version": 1,
+                "bundle_type": "pipeline_package",
+                "project_name": "Invalid Video End",
+                "assets_dir": "assets",
+                "pipeline": {
+                    "tracks": [
+                        {
+                            "kind": "video",
+                            "name": "video",
+                            "clips": [
+                                { "path": "video/88.mp4", "start": 0.0, "end": 1.0 }
+                            ]
+                        }
+                    ]
+                }
+            }))?,
+        )?;
+
+        let mut progress_events = Vec::new();
+        let error = import_bundle_with_progress(
+            &ImportBundleOptions {
+                source: bundle_dir,
+                output: Utf8PathBuf::from_path_buf(temp.path().join("draft")).unwrap(),
+                name_override: None,
+            },
+            |event| progress_events.push(event),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}")
+            .contains("pipeline.tracks[0].clips[0].end is not supported for video tracks"));
+        assert!(progress_events.is_empty());
         Ok(())
     }
 }

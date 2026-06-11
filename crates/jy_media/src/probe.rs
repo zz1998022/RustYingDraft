@@ -230,9 +230,6 @@ mod tests {
     #[test]
     fn prefers_explicit_override() {
         let custom = OsString::from("/opt/yingdraft/ffprobe");
-        assert_eq!(
-            resolve_ffprobe_program(Some(custom.clone())),
-            custom
-        );
+        assert_eq!(resolve_ffprobe_program(Some(custom.clone())), custom);
     }
 }

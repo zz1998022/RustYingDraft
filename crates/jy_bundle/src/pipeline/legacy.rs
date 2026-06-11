@@ -1,18 +1,24 @@
 use anyhow::{anyhow, bail, Context, Result};
 use camino::Utf8Path;
 use jy_draft::writer::write_draft;
-use jy_media::material::{create_audio_material, create_video_material};
 use jy_schema::{Canvas, MaterialKind, TimeRange, TrackKind};
 use jy_timeline::builder::ProjectBuilder;
 use jy_timeline::clip::{make_audio_clip, make_text_clip, make_video_clip};
+use serde_json::json;
 
-use crate::api::{BundleInspection, ImportBundleOptions, ImportBundleSummary};
+use crate::api::{
+    BundleInspection, ImportBundleOptions, ImportBundleProgress, ImportBundleSummary,
+};
 use crate::fs_util::{ensure_output_dir_ready, resolve_pipeline_asset_path, seconds_to_micros};
 use crate::manifest::BundleManifest;
+use crate::media_cache::{MediaMaterialCache, MediaProbeRequest};
 use crate::pipeline::concat::parse_concat_file;
 use crate::pipeline::spec::PipelineSpec;
 use crate::pipeline::srt::parse_srt_file;
-use crate::pipeline::validate_pipeline_narration_count;
+use crate::pipeline::{
+    emit_pipeline_progress, ensure_not_cancelled, progress_count_data,
+    validate_pipeline_narration_count,
+};
 use crate::source::PreparedSource;
 use crate::subtitle_style::{build_simple_subtitle_style, build_simple_subtitle_transform};
 
@@ -21,7 +27,10 @@ pub(crate) fn import_pipeline_legacy_package(
     prepared: &PreparedSource,
     bundle: &BundleManifest,
     pipeline: &PipelineSpec,
+    progress: &mut impl FnMut(ImportBundleProgress),
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<ImportBundleSummary> {
+    ensure_not_cancelled(is_cancelled)?;
     let concat_file = pipeline
         .concat_file
         .as_deref()
@@ -48,6 +57,58 @@ pub(crate) fn import_pipeline_legacy_package(
     let subtitles = parse_srt_file(&subtitle_path)
         .with_context(|| format!("failed to parse subtitle file: {subtitle_path}"))?;
     validate_pipeline_narration_count(&pipeline.narration_files, &subtitles)?;
+    emit_pipeline_progress(
+        progress,
+        "pipeline_prepare",
+        "已读取 pipeline_package",
+        json!({
+            "video_count": video_files.len(),
+            "audio_count": pipeline.narration_files.len(),
+            "subtitle_count": subtitles.len(),
+        }),
+    );
+
+    let mut probe_requests = Vec::with_capacity(video_files.len() + pipeline.narration_files.len());
+    for (index, video_file) in video_files.iter().enumerate() {
+        let material_path = resolve_pipeline_asset_path(
+            &format!("concat file[{index}]"),
+            video_file,
+            &prepared.bundle_root,
+            bundle.assets_dir.as_deref(),
+        )
+        .with_context(|| format!("invalid concat file[{index}] path"))?;
+        probe_requests.push(MediaProbeRequest {
+            path: material_path,
+            label: format!("failed to load concat video[{index}]: {video_file}"),
+        });
+    }
+    for (index, narration_file) in pipeline.narration_files.iter().enumerate() {
+        let narration_path = resolve_pipeline_asset_path(
+            &format!("pipeline.narration_files[{index}]"),
+            narration_file,
+            &prepared.bundle_root,
+            bundle.assets_dir.as_deref(),
+        )
+        .with_context(|| format!("invalid pipeline.narration_files[{index}] path"))?;
+        probe_requests.push(MediaProbeRequest {
+            path: narration_path,
+            label: format!("failed to load pipeline narration[{index}]: {narration_file}"),
+        });
+    }
+
+    let media_cache = MediaMaterialCache::preload(
+        probe_requests,
+        |current, total, request| {
+            emit_pipeline_progress(
+                progress,
+                "pipeline_probe",
+                format!("探测素材 {current}/{total}"),
+                progress_count_data(current, total, Some(request.path.as_str())),
+            );
+        },
+        is_cancelled,
+    )?;
+    ensure_not_cancelled(is_cancelled)?;
 
     let project_name = options
         .name_override
@@ -70,7 +131,8 @@ pub(crate) fn import_pipeline_legacy_package(
             bundle.assets_dir.as_deref(),
         )
         .with_context(|| format!("invalid concat file[{index}] path"))?;
-        let material = create_video_material(&material_path, None)
+        let material = media_cache
+            .create_video_material(&material_path, None)
             .with_context(|| format!("failed to load concat video[{index}]: {video_file}"))?;
         if material.kind != MaterialKind::Video {
             bail!("concat video[{index}] is not a video material: {video_file}");
@@ -114,9 +176,11 @@ pub(crate) fn import_pipeline_legacy_package(
             bundle.assets_dir.as_deref(),
         )
         .with_context(|| format!("invalid pipeline.narration_files[{index}] path"))?;
-        let audio_material = create_audio_material(&narration_path, None).with_context(|| {
-            format!("failed to load pipeline narration[{index}]: {narration_file}")
-        })?;
+        let audio_material = media_cache
+            .create_audio_material(&narration_path, None)
+            .with_context(|| {
+                format!("failed to load pipeline narration[{index}]: {narration_file}")
+            })?;
         let cue_duration = end - start;
         let audio_duration = audio_material.duration.min(cue_duration);
         if audio_duration == 0 {
@@ -145,6 +209,13 @@ pub(crate) fn import_pipeline_legacy_package(
     let mut project = builder.build();
     project.id = bundle.project_id.clone().unwrap_or(project.id);
 
+    ensure_not_cancelled(is_cancelled)?;
+    emit_pipeline_progress(
+        progress,
+        "pipeline_write",
+        "写入剪映草稿",
+        json!({ "output": options.output.as_str() }),
+    );
     ensure_output_dir_ready(&options.output)?;
     write_draft(&project, &options.output)?;
 
