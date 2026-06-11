@@ -2,7 +2,10 @@ mod app;
 mod fonts;
 mod job;
 mod platform;
+mod theme;
 mod util;
+
+use std::sync::Arc;
 
 use eframe::egui;
 
@@ -12,8 +15,9 @@ fn main() -> eframe::Result {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 520.0])
-            .with_min_inner_size([640.0, 420.0]),
+            .with_inner_size([720.0, 800.0])
+            .with_resizable(false) // 固定窗口尺寸，避免拉伸破坏布局
+            .with_icon(Arc::new(theme::app_icon())),
         ..Default::default()
     };
 
@@ -22,6 +26,7 @@ fn main() -> eframe::Result {
         native_options,
         Box::new(|cc| {
             fonts::install_builtin_fonts(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx);
             Ok(Box::new(app::YingDraftApp::new()))
         }),
     )

@@ -7589,6 +7589,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "eframe",
+ "image",
  "jy_bundle",
  "rfd",
 ]

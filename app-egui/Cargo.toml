@@ -11,5 +11,6 @@ eframe = { version = "0.31", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 jy_bundle = { path = "../crates/jy_bundle" }
 rfd = "0.16"

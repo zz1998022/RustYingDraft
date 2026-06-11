@@ -12,6 +12,7 @@ use crate::job::{spawn_import_job, ImportJobEvent};
 use crate::platform::{
     detect_bundle_candidates, detect_known_draft_box_dirs, open_path_in_file_manager,
 };
+use crate::theme;
 use crate::util::{path_row, resolve_picked_source, sanitize_draft_name};
 
 pub(crate) struct YingDraftApp {
@@ -32,6 +33,8 @@ pub(crate) struct YingDraftApp {
     cancelling: bool,
     error: String,
     summary: Option<ImportBundleSummary>,
+    // 上次已自动读取过的 source，用于检测变化、避免每帧重复读取。
+    last_inspected_source: String,
 }
 
 impl YingDraftApp {
@@ -65,6 +68,22 @@ impl YingDraftApp {
             cancelling: false,
             error: String::new(),
             summary: None,
+            last_inspected_source: String::new(),
+        }
+    }
+
+    /// source 变化时自动读取包信息：选择/启动检测到新包都会触发。
+    ///
+    /// 仅在路径真实存在时读取，避免手动输入半截路径时反复报错；
+    /// 读过的 source 记下来，防止每帧重复读取。读不到时用户仍可点手动按钮重试。
+    fn auto_inspect_if_source_changed(&mut self) {
+        let source = self.source.trim().to_string();
+        if source == self.last_inspected_source {
+            return;
+        }
+        self.last_inspected_source = source.clone();
+        if !source.is_empty() && std::path::Path::new(&source).exists() {
+            self.inspect_source();
         }
     }
 
@@ -206,123 +225,208 @@ impl eframe::App for YingDraftApp {
         if self.importing {
             // 导入中持续定时重绘，保证进度条和耗时实时更新。
             ctx.request_repaint_after(Duration::from_millis(100));
+        } else {
+            // 非导入态下，source 变化时自动读取包信息。
+            self.auto_inspect_if_source_changed();
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("YingDraft 导入器");
-            ui.add_space(8.0);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // 品牌头部：小标题 + 主标题 + 一句引导语。
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("DRAMFLOW · 剪映导入插件")
+                        .size(12.0)
+                        .color(theme::KICKER)
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new("把下载好的项目，一键变成剪映草稿")
+                        .size(24.0)
+                        .color(theme::TITLE)
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new("选择草稿包和草稿箱目录，点开始导入，剩下交给它。")
+                        .color(theme::MUTED),
+                );
+                ui.add_space(14.0);
 
-            ui.add_enabled_ui(!self.importing, |ui| {
-                // 草稿包来源支持目录 / .zip / bundle.json 三种，和 jy_bundle 接受的形态一致。
-                ui.horizontal(|ui| {
-                    ui.label("草稿包");
-                    ui.text_edit_singleline(&mut self.source);
-                    if ui.button("选目录").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            self.source = path.display().to_string();
+                card_section(ui, "STEP 1", "选项目", |ui| {
+                    ui.add_enabled_ui(!self.importing, |ui| {
+                        // 草稿包来源支持目录 / .zip / bundle.json 三种，和 jy_bundle 接受的形态一致。
+                        ui.horizontal(|ui| {
+                            ui.label("草稿包");
+                            ui.text_edit_singleline(&mut self.source);
+                            if ui.button("选目录").clicked() {
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    self.source = path.display().to_string();
+                                }
+                            }
+                            if ui.button("选文件").clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("草稿包 (.zip / bundle.json)", &["zip", "json"])
+                                    .pick_file()
+                                {
+                                    self.source = resolve_picked_source(&path);
+                                }
+                            }
+                        });
+                        if ui.button("读取包信息").clicked() {
+                            self.inspect_source();
                         }
-                    }
-                    if ui.button("选文件").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("草稿包 (.zip / bundle.json)", &["zip", "json"])
-                            .pick_file()
+                    });
+                });
+                ui.add_space(12.0);
+
+                card_section(ui, "STEP 2", "草稿箱与名称", |ui| {
+                    ui.add_enabled_ui(!self.importing, |ui| {
+                        path_row(ui, "剪映草稿箱目录", &mut self.draft_box_dir, "选择", || {
+                            rfd::FileDialog::new()
+                                .pick_folder()
+                                .map(|path| path.display().to_string())
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("草稿名");
+                            ui.label(
+                                egui::RichText::new("（可修改）")
+                                    .size(12.0)
+                                    .color(theme::MUTED),
+                            );
+                        });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.draft_name)
+                                .hint_text("给这份草稿起个名字")
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
+                });
+                ui.add_space(12.0);
+
+                card_section(ui, "STEP 3", "开始生成", |ui| {
+                    ui.horizontal(|ui| {
+                        // 主操作按钮用品牌橙强调。
+                        let start = egui::Button::new(
+                            egui::RichText::new("开始导入").color(egui::Color32::WHITE).strong(),
+                        )
+                        .fill(theme::ACCENT);
+                        if ui.add_enabled(!self.importing, start).clicked() {
+                            self.start_import(ctx);
+                        }
+                        if ui
+                            .add_enabled(
+                                self.importing && !self.cancelling,
+                                egui::Button::new("取消导入"),
+                            )
+                            .clicked()
                         {
-                            self.source = resolve_picked_source(&path);
+                            self.cancel_import(ctx);
+                        }
+                    });
+
+                    ui.add_space(6.0);
+                    // 状态行：导入中常驻 spinner，明确「还在干活」，
+                    // 避免某个阶段进度条满格被误当成整体完成。
+                    ui.horizontal(|ui| {
+                        if self.importing {
+                            ui.add(egui::Spinner::new());
+                        }
+                        ui.label(format!("状态：{}", self.status));
+                    });
+                    if !self.stage.is_empty() {
+                        ui.label(format!("阶段：{}", stage_label(&self.stage)));
+                    }
+                    if let Some(elapsed) = self.elapsed_duration() {
+                        ui.label(format!("耗时：{:.1}s", elapsed.as_secs_f32()));
+                    }
+                    if self.progress_total > 0 {
+                        // 进度条只表示「当前阶段」进度；整体完成以下方小结为准。
+                        let ratio = self.progress_current as f32 / self.progress_total as f32;
+                        let label = stage_label(&self.stage);
+                        ui.add(egui::ProgressBar::new(ratio.clamp(0.0, 1.0)).text(format!(
+                            "{label} {}/{}",
+                            self.progress_current, self.progress_total
+                        )));
+                    }
+                    if self.importing && !self.current_path.is_empty() {
+                        ui.label(format!("当前文件：{}", self.current_path));
+                    }
+
+                    if let Some(summary) = &self.summary {
+                        ui.add_space(4.0);
+                        ui.label(format!("输出目录：{}", summary.draft_dir));
+                        ui.label(format!(
+                            "轨道：{}，素材：{}，视频素材：{}，音频素材：{}",
+                            summary.track_count,
+                            summary.asset_count,
+                            summary.video_material_count,
+                            summary.audio_material_count
+                        ));
+                        if ui.button("打开输出目录").clicked() {
+                            let _ = open_path_in_file_manager(&summary.draft_dir);
                         }
                     }
-                });
-                path_row(
-                    ui,
-                    "剪映草稿箱目录",
-                    &mut self.draft_box_dir,
-                    "选择",
-                    || {
-                        rfd::FileDialog::new()
-                            .pick_folder()
-                            .map(|path| path.display().to_string())
-                    },
-                );
-                ui.horizontal(|ui| {
-                    ui.label("草稿名");
-                    ui.text_edit_singleline(&mut self.draft_name);
-                });
-            });
 
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!self.importing, egui::Button::new("读取包信息"))
-                    .clicked()
-                {
-                    self.inspect_source();
-                }
-                if ui
-                    .add_enabled(!self.importing, egui::Button::new("开始导入"))
-                    .clicked()
-                {
-                    self.start_import(ctx);
-                }
-                if ui
-                    .add_enabled(
-                        self.importing && !self.cancelling,
-                        egui::Button::new("取消导入"),
-                    )
-                    .clicked()
-                {
-                    self.cancel_import(ctx);
-                }
-            });
-
-            ui.separator();
-            ui.label(format!("状态：{}", self.status));
-            if !self.stage.is_empty() {
-                ui.label(format!("阶段：{}", self.stage));
-            }
-            if let Some(elapsed) = self.elapsed_duration() {
-                ui.label(format!("耗时：{:.1}s", elapsed.as_secs_f32()));
-            }
-            if self.progress_total > 0 {
-                let ratio = self.progress_current as f32 / self.progress_total as f32;
-                ui.add(
-                    egui::ProgressBar::new(ratio.clamp(0.0, 1.0))
-                        .text(format!("{}/{}", self.progress_current, self.progress_total)),
-                );
-            }
-            if !self.current_path.is_empty() {
-                ui.label(format!("当前文件：{}", self.current_path));
-            }
-
-            if let Some(summary) = &self.summary {
-                ui.separator();
-                ui.label(format!("输出目录：{}", summary.draft_dir));
-                ui.label(format!(
-                    "轨道：{}，素材：{}，视频素材：{}，音频素材：{}",
-                    summary.track_count,
-                    summary.asset_count,
-                    summary.video_material_count,
-                    summary.audio_material_count
-                ));
-                if ui.button("打开输出目录").clicked() {
-                    let _ = open_path_in_file_manager(&summary.draft_dir);
-                }
-            }
-
-            if !self.error.is_empty() {
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("错误详情");
-                    if ui.button("复制").clicked() {
-                        ui.ctx().copy_text(self.error.clone());
+                    if !self.error.is_empty() {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("错误详情").strong());
+                            if ui.button("复制").clicked() {
+                                ui.ctx().copy_text(self.error.clone());
+                            }
+                        });
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.error)
+                                .desired_rows(6)
+                                .desired_width(f32::INFINITY)
+                                .code_editor(),
+                        );
                     }
                 });
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.error)
-                        .desired_rows(7)
-                        .code_editor(),
+
+                ui.add_space(14.0);
+                ui.label(
+                    egui::RichText::new("Created by LemonChan · Dramabyte")
+                        .size(12.0)
+                        .color(theme::MUTED),
                 );
-            }
+            });
         });
     }
+}
+
+/// 把后台进度事件的阶段码翻译成用户能看懂的中文。
+/// 这些阶段各自有独立计数，进度条满格只代表「当前阶段」完成、不代表整体完成。
+fn stage_label(stage: &str) -> &str {
+    match stage {
+        "pipeline_prepare" => "准备中",
+        "pipeline_probe" => "探测素材",
+        "pipeline_write" => "写入草稿",
+        "download_asset" => "下载素材",
+        other => other, // 未知阶段原样显示，便于排查
+    }
+}
+
+/// 一张分步卡片：橙色 Step 小标题 + 标题 + 自定义内容，外观见 theme::card_frame。
+fn card_section(ui: &mut egui::Ui, kicker: &str, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    theme::card_frame().show(ui, |ui| {
+        // Frame 默认按内容收缩，撑满可用宽度让每张卡片右边缘对齐。
+        ui.set_width(ui.available_width());
+        ui.label(
+            egui::RichText::new(kicker)
+                .size(11.0)
+                .color(theme::KICKER)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new(title)
+                .size(18.0)
+                .color(theme::TITLE)
+                .strong(),
+        );
+        ui.add_space(8.0);
+        add(ui);
+    });
 }
 
 #[cfg(test)]
