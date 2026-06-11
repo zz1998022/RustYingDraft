@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# 下载固定版本的 ffprobe 静态二进制并校验 SHA256，写入
-# app/src-tauri/binaries/ffprobe-<rust-target-triple>，供 Tauri externalBin 打包使用。
-# 本地开发和 CI 构建前都先跑一次。
+# 下载固定版本的 ffprobe 静态二进制并校验 SHA256。
+#
+# 用法：
+#   scripts/fetch-ffprobe.sh                 # 默认输出到 Tauri externalBin 需要的
+#                                            # app/src-tauri/binaries/ffprobe-<triple>
+#   scripts/fetch-ffprobe.sh <output_path>   # 直接输出到指定文件（egui 发布包用它
+#                                            # 把 ffprobe 放到可执行文件同目录）
 #
 # 固定版本 + hash 校验是为了让 release 可复现、控制供应链风险。
 # 来源、版本与许可证见 README「桌面端自带 ffprobe」一节，均为 FFmpeg 的 GPL 静态构建。
 set -euo pipefail
 
+out_override="${1:-}"
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 dest_dir="$repo_root/app/src-tauri/binaries"
-mkdir -p "$dest_dir"
 
 triple="$(rustc -Vv | sed -n 's/^host: //p')"
 if [[ -z "$triple" ]]; then
@@ -70,6 +75,11 @@ if [[ "$actual_sha256" != "$expected_sha256" ]]; then
   exit 1
 fi
 
-out="$dest_dir/ffprobe-$triple"
+if [[ -n "$out_override" ]]; then
+  out="$out_override"
+else
+  out="$dest_dir/ffprobe-$triple"
+fi
+mkdir -p "$(dirname "$out")"
 install -m 0755 "$src" "$out"
 echo "已写入 $out (sha256 校验通过)"

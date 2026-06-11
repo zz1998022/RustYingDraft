@@ -1,9 +1,15 @@
-# 下载固定版本的 Windows ffprobe.exe 并校验 SHA256，写入
-# app/src-tauri/binaries/ffprobe-<rust-target-triple>.exe，供 Tauri externalBin 打包使用。
-# 本地开发和 CI 构建前都先跑一次。
+# 下载固定版本的 Windows ffprobe.exe 并校验 SHA256。
+#
+# 用法：
+#   scripts/fetch-ffprobe.ps1                      # 默认输出到 Tauri externalBin 需要的
+#                                                  # app/src-tauri/binaries/ffprobe-<triple>.exe
+#   scripts/fetch-ffprobe.ps1 -OutFile <path>      # 直接输出到指定文件（egui 发布包用它
+#                                                  # 把 ffprobe.exe 放到可执行文件同目录）
 #
 # 固定版本 + hash 校验是为了让 release 可复现、控制供应链风险。
 # 来源、版本与许可证见 README「桌面端自带 ffprobe」一节，为 FFmpeg 的 GPL 静态构建。
+param([string]$OutFile)
+
 $ErrorActionPreference = "Stop"
 
 # gyan.dev FFmpeg 8.1.1 essentials 构建。
@@ -13,7 +19,6 @@ $ExpectedSha256 = "0fde260f5abd35c9cafd96f594cc76365a780c1b73a90e35b6a3409ea1db1
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $destDir = Join-Path $repoRoot "app/src-tauri/binaries"
-New-Item -ItemType Directory -Force -Path $destDir | Out-Null
 
 $hostLine = (& rustc -Vv | Select-String '^host: ')
 if (-not $hostLine) { throw "无法解析 rustc host triple，请确认已安装 Rust。" }
@@ -34,7 +39,12 @@ try {
     throw "ffprobe SHA256 校验失败，已中止：`n  来源: $Url`n  期望: $ExpectedSha256`n  实际: $actual"
   }
 
-  $out = Join-Path $destDir "ffprobe-$triple.exe"
+  if ($OutFile) {
+    $out = $OutFile
+  } else {
+    $out = Join-Path $destDir "ffprobe-$triple.exe"
+  }
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $out) | Out-Null
   Copy-Item -Path $src.FullName -Destination $out -Force
   Write-Host "已写入 $out (sha256 校验通过)"
 } finally {

@@ -1,0 +1,137 @@
+name: Build Egui App
+
+on:
+  push:
+    tags:
+      - "v*"
+  # 允许不打 tag 手动触发，仅构建验证（manual 运行不会进入 publish 发布步骤）。
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            artifact_name: yingdraft-egui-windows-x64
+          - runner: ubuntu-22.04
+            artifact_name: yingdraft-egui-linux-x64
+          # 仅发 Intel 包：Apple Silicon 通过 Rosetta 运行，规避未签名 arm64 被系统拒绝。
+          - runner: macos-15-intel
+            artifact_name: yingdraft-egui-macos-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          # eframe(glow) + rfd 文件对话框所需的系统库。
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            curl \
+            file \
+            libgtk-3-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgl1-mesa-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcb1-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: egui-${{ matrix.artifact_name }}
+          workspaces: |
+            . -> target
+
+      - name: Drop incompatible Linux release cache
+        if: runner.os == 'Linux'
+        run: |
+          # 与 Tauri 工作流一致：避免复用更高 glibc runner 产物。
+          rm -rf target/release/build target/release/deps target/release/.fingerprint target/release/incremental
+
+      - name: Build egui app
+        run: cargo build -p yingdraft_egui --release
+
+      - name: Stage package
+        shell: bash
+        run: |
+          # 发布包结构：可执行文件 + 同目录 ffprobe，configure_bundled_ffprobe 会就近找到它。
+          stage="dist/${{ matrix.artifact_name }}"
+          mkdir -p "$stage"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "target/release/yingdraft_egui.exe" "$stage/"
+            pwsh scripts/fetch-ffprobe.ps1 -OutFile "$stage/ffprobe.exe"
+          else
+            cp "target/release/yingdraft_egui" "$stage/"
+            bash scripts/fetch-ffprobe.sh "$stage/ffprobe"
+            chmod +x "$stage/yingdraft_egui" "$stage/ffprobe"
+          fi
+          # 随包附带 GPL 许可证文本。
+          cp LICENSE "$stage/"
+          ls -la "$stage"
+          cd dist
+          tar -czf "${{ matrix.artifact_name }}.tar.gz" "${{ matrix.artifact_name }}"
+
+      - name: Upload egui bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            dist/${{ matrix.artifact_name }}
+            dist/${{ matrix.artifact_name }}.tar.gz
+
+  publish:
+    name: Publish Egui Release Assets
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          mkdir -p release-upload
+          find release-assets -name "yingdraft-egui-*.tar.gz" -type f -exec cp {} release-upload/ \;
+          ls -lh release-upload
+          count="$(find release-upload -name "yingdraft-egui-*.tar.gz" -type f | wc -l | tr -d ' ')"
+          if [[ "$count" -ne 3 ]]; then
+            echo "预期 3 个 egui 发布包（Windows / Linux / macOS Intel），实际找到 $count 个。" >&2
+            exit 1
+          fi
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 \
+            || gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TAG" \
+              --generate-notes \
+              --target "$GITHUB_SHA"
+          gh release upload "$RELEASE_TAG" release-upload/*.tar.gz --clobber
